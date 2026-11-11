@@ -1,23 +1,5 @@
-//! Windows System Media Transport Controls integration.
-//!
-//! Registers the app window with SMTC so the volume overlay, the media keys
-//! (play/pause, next, previous) and the lock screen show what is playing.
-//! On non-Windows builds this module compiles to nothing and the app plays
-//! without system integration.
+//! System media controls bound to the native desktop window.
 
-use std::sync::Arc;
-
-use gpui::Window;
-use windows::core::HSTRING;
-use windows::Foundation::TypedEventHandler;
-use windows::Media::{
-    MediaPlaybackStatus, MediaPlaybackType, MusicDisplayProperties,
-    SystemMediaTransportControls, SystemMediaTransportControlsButton,
-    SystemMediaTransportControlsButtonPressedEventArgs,
-    SystemMediaTransportControlsTimelineProperties,
-};
-
-/// Commands SMTC asks the app to run. Drained by the UI loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaCommand {
     Play,
@@ -26,125 +8,175 @@ pub enum MediaCommand {
     Previous,
 }
 
-#[derive(Default)]
-pub struct Smtc {
-    /// Commands queued by the system, newest last.
-    commands: Arc<std::sync::Mutex<Vec<MediaCommand>>>,
-    controls: Option<SystemMediaTransportControls>,
-}
+#[cfg(windows)]
+mod platform {
+    use super::MediaCommand;
+    use gpui::Window;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use std::sync::{Arc, Mutex};
+    use windows::Foundation::{TimeSpan, TypedEventHandler};
+    use windows::Media::{
+        MediaPlaybackStatus, MediaPlaybackType, SystemMediaTransportControls,
+        SystemMediaTransportControlsButton, SystemMediaTransportControlsButtonPressedEventArgs,
+        SystemMediaTransportControlsTimelineProperties,
+    };
+    use windows::Win32::Foundation::{E_FAIL, HWND};
+    use windows::Win32::System::WinRT::ISystemMediaTransportControlsInterop;
+    use windows::core::{Error, HSTRING, factory};
 
-impl Smtc {
-    /// Attaches SMTC to the given window. Must run on the UI thread.
-    pub fn attach(window: &Window) -> Self {
-        let mut smtc = Self::default();
-        if let Err(error) = smtc.bind(window) {
-            tracing::warn!("SMTC unavailable: {error}");
-        }
-        smtc
+    #[derive(Default)]
+    pub struct Smtc {
+        commands: Arc<Mutex<Vec<MediaCommand>>>,
+        controls: Option<SystemMediaTransportControls>,
+        button_token: Option<i64>,
+        metadata: Mutex<Option<(String, String)>>,
     }
 
-    #[cfg(target_os = "windows")]
-    fn bind(&mut self, window: &Window) -> windows::core::Result<()> {
-        // GetForCurrentView reads the current app view; GPUI threads its HWND
-        // through the window handle, so re-attach on the window's thread.
-        let controls = SystemMediaTransportControls::GetForCurrentView()?;
-        controls.SetIsEnabled(true)?;
-        controls
-            .DisplayUpdater()?
-            .SetType(MediaPlaybackType::Music)?;
+    impl Smtc {
+        pub fn attach(window: &Window) -> Self {
+            let mut smtc = Self::default();
+            if let Err(error) = smtc.bind(window) {
+                eprintln!("melos: SMTC unavailable: {error}");
+            }
+            smtc
+        }
 
-        let commands = self.commands.clone();
-        controls.ButtonPressed(&TypedEventHandler::<
-            SystemMediaTransportControls,
-            SystemMediaTransportControlsButtonPressedEventArgs,
-        >::new(move |_, args| {
-            if let Some(args) = args.as_ref() {
-                let button = args.Button()?;
-                let command = match button {
-                    SystemMediaTransportControlsButton::Play => Some(MediaCommand::Play),
-                    SystemMediaTransportControlsButton::Pause => Some(MediaCommand::Pause),
-                    SystemMediaTransportControlsButton::Next => Some(MediaCommand::Next),
-                    SystemMediaTransportControlsButton::Previous => {
-                        Some(MediaCommand::Previous)
+        fn bind(&mut self, window: &Window) -> windows::core::Result<()> {
+            let raw = HasWindowHandle::window_handle(window)
+                .map_err(|_| Error::new(E_FAIL, "native window handle unavailable"))?
+                .as_raw();
+            let RawWindowHandle::Win32(handle) = raw else {
+                return Err(Error::new(E_FAIL, "expected Win32 window"));
+            };
+            let interop =
+                factory::<SystemMediaTransportControls, ISystemMediaTransportControlsInterop>()?;
+            // The GPUI window owns the HWND and outlives this registration.
+            // Desktop apps use GetForWindow instead of UWP GetForCurrentView.
+            let controls: SystemMediaTransportControls =
+                unsafe { interop.GetForWindow(HWND(handle.hwnd.get() as *mut _))? };
+            controls.SetIsEnabled(true)?;
+            controls.SetIsPlayEnabled(true)?;
+            controls.SetIsPauseEnabled(true)?;
+            controls.SetIsNextEnabled(true)?;
+            controls.SetIsPreviousEnabled(true)?;
+            controls
+                .DisplayUpdater()?
+                .SetType(MediaPlaybackType::Music)?;
+            let commands = Arc::clone(&self.commands);
+            let token = controls.ButtonPressed(&TypedEventHandler::<
+                SystemMediaTransportControls,
+                SystemMediaTransportControlsButtonPressedEventArgs,
+            >::new(move |_, args| {
+                if let Some(args) = args.as_ref() {
+                    let command = match args.Button()? {
+                        SystemMediaTransportControlsButton::Play => Some(MediaCommand::Play),
+                        SystemMediaTransportControlsButton::Pause => Some(MediaCommand::Pause),
+                        SystemMediaTransportControlsButton::Next => Some(MediaCommand::Next),
+                        SystemMediaTransportControlsButton::Previous => {
+                            Some(MediaCommand::Previous)
+                        }
+                        _ => None,
+                    };
+                    if let Some(command) = command
+                        && let Ok(mut queue) = commands.lock()
+                    {
+                        queue.push(command);
                     }
-                    _ => None,
-                };
-                if let Some(command) = command
-                    && let Ok(mut queue) = commands.lock()
-                {
-                    queue.push(command);
+                }
+                Ok(())
+            }))?;
+            self.button_token = Some(token);
+            self.controls = Some(controls);
+            Ok(())
+        }
+
+        pub fn drain(&self) -> Vec<MediaCommand> {
+            self.commands
+                .lock()
+                .map(|mut queue| queue.drain(..).collect())
+                .unwrap_or_default()
+        }
+        pub fn available(&self) -> bool {
+            self.controls.is_some()
+        }
+        pub fn update(&self, title: &str, artist: &str, position_ms: u64, duration_ms: u64) {
+            if let Err(error) = self.publish(title, artist, position_ms, duration_ms) {
+                eprintln!("melos: SMTC update failed: {error}");
+            }
+        }
+        pub fn publish(
+            &self,
+            title: &str,
+            artist: &str,
+            position_ms: u64,
+            duration_ms: u64,
+        ) -> windows::core::Result<()> {
+            let Some(controls) = self.controls.as_ref() else {
+                return Err(Error::new(E_FAIL, "SMTC unavailable"));
+            };
+            if let Ok(mut metadata) = self.metadata.lock() {
+                let next = (title.to_owned(), artist.to_owned());
+                if metadata.as_ref() != Some(&next) {
+                    let updater = controls.DisplayUpdater()?;
+                    let properties = updater.MusicProperties()?;
+                    properties.SetTitle(&HSTRING::from(title))?;
+                    properties.SetArtist(&HSTRING::from(artist))?;
+                    updater.Update()?;
+                    *metadata = Some(next);
                 }
             }
-            Ok(())
-        }));
-
-        self.controls = Some(controls);
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn bind(&mut self, _window: &Window) -> windows::core::Result<()> {
-        Ok(())
-    }
-
-    /// Removes and returns every queued command.
-    pub fn drain(&self) -> Vec<MediaCommand> {
-        self.commands
-            .lock()
-            .map(|mut queue| queue.drain(..).collect())
-            .unwrap_or_default()
-    }
-
-    /// Publishes the current track metadata and timeline.
-    pub fn update(&self, title: &str, artist: &str, position_ms: u64, duration_ms: u64) {
-        #[cfg(target_os = "windows")]
-        if let Some(controls) = self.controls.as_ref() {
-            let _ = self.publish(controls, title, artist, position_ms, duration_ms);
-        }
-        #[cfg(not(target_os = "windows"))]
-        let _ = (title, artist, position_ms, duration_ms);
-    }
-
-    /// Reflects the playback state (playing / paused / stopped).
-    pub fn set_status(&self, playing: Option<bool>) {
-        #[cfg(target_os = "windows")]
-        if let Some(controls) = self.controls.as_ref() {
-            let status = match playing {
-                Some(true) => MediaPlaybackStatus::Playing,
-                Some(false) => MediaPlaybackStatus::Paused,
-                None => MediaPlaybackStatus::Stopped,
+            let ticks = |ms: u64| TimeSpan {
+                Duration: ms.saturating_mul(10_000).min(i64::MAX as u64) as i64,
             };
-            let _ = controls.SetPlaybackStatus(status);
+            let timeline = SystemMediaTransportControlsTimelineProperties::new()?;
+            timeline.SetStartTime(ticks(0))?;
+            timeline.SetMinSeekTime(ticks(0))?;
+            timeline.SetPosition(ticks(position_ms.min(duration_ms)))?;
+            timeline.SetMaxSeekTime(ticks(duration_ms))?;
+            timeline.SetEndTime(ticks(duration_ms))?;
+            controls.UpdateTimelineProperties(&timeline)
         }
-        #[cfg(not(target_os = "windows"))]
-        let _ = playing;
+        pub fn set_status(&self, playing: Option<bool>) {
+            if let Some(controls) = self.controls.as_ref() {
+                let status = match playing {
+                    Some(true) => MediaPlaybackStatus::Playing,
+                    Some(false) => MediaPlaybackStatus::Paused,
+                    None => MediaPlaybackStatus::Stopped,
+                };
+                if let Err(error) = controls.SetPlaybackStatus(status) {
+                    eprintln!("melos: SMTC status failed: {error}");
+                }
+            }
+        }
+    }
+    impl Drop for Smtc {
+        fn drop(&mut self) {
+            if let Some(controls) = self.controls.take() {
+                if let Some(token) = self.button_token.take() {
+                    let _ = controls.RemoveButtonPressed(token);
+                }
+                let _ = controls.SetIsEnabled(false);
+            }
+        }
     }
 }
 
-#[cfg(target_os = "windows")]
-impl Smtc {
-    fn publish(
-        &self,
-        controls: &SystemMediaTransportControls,
-        title: &str,
-        artist: &str,
-        position_ms: u64,
-        duration_ms: u64,
-    ) -> windows::core::Result<()> {
-        let properties: MusicDisplayProperties = controls.DisplayUpdater()?.MusicProperties()?;
-        properties.SetTitle(&HSTRING::from(title))?;
-        properties.SetArtist(&HSTRING::from(artist))?;
-        controls.DisplayUpdater()?.Update()?;
-
-        let timeline = SystemMediaTransportControlsTimelineProperties::new()?;
-        timeline.SetPosition(windows::Foundation::TimeSpan {
-            // 100ns ticks, the WinRT media clock unit.
-            Duration: (position_ms * 10_000) as i64,
-        });
-        timeline.SetEndTime(windows::Foundation::TimeSpan {
-            Duration: (duration_ms * 10_000) as i64,
-        });
-        controls.UpdateTimelineProperties(&timeline)?;
-        Ok(())
+#[cfg(not(windows))]
+mod platform {
+    use super::MediaCommand;
+    pub struct Smtc;
+    impl Smtc {
+        pub fn attach(_: &gpui::Window) -> Self {
+            Self
+        }
+        pub fn drain(&self) -> Vec<MediaCommand> {
+            Vec::new()
+        }
+        pub fn available(&self) -> bool {
+            false
+        }
+        pub fn update(&self, _: &str, _: &str, _: u64, _: u64) {}
+        pub fn set_status(&self, _: Option<bool>) {}
     }
 }
+pub use platform::Smtc;

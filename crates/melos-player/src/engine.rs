@@ -124,9 +124,7 @@ impl Engine {
     /// threads.
     pub fn new() -> Result<Self, PlayerError> {
         let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or(PlayerError::NoDevice)?;
+        let device = host.default_output_device().ok_or(PlayerError::NoDevice)?;
         let supported = device
             .default_output_config()
             .map_err(|e| PlayerError::Config(e.to_string()))?;
@@ -180,10 +178,10 @@ impl Engine {
 
     /// Seeks within the current track.
     pub fn seek(&self, position_ms: u64) {
-        if let Ok(mut desired) = self.shared.desired.lock() {
-            if desired.current.is_some() {
-                desired.seek = Some(position_ms);
-            }
+        if let Ok(mut desired) = self.shared.desired.lock()
+            && desired.current.is_some()
+        {
+            desired.seek = Some(position_ms);
         }
         self.shared.wake.notify_all();
     }
@@ -290,7 +288,7 @@ where
     let shared_cb = Arc::clone(shared);
 
     let stream = device.build_output_stream(
-        config.clone(),
+        *config,
         move |data: &mut [T], _| fill(data, &shared_cb, channels),
         |error| eprintln!("melos: audio stream error: {error}"),
         None,
@@ -370,17 +368,15 @@ fn decode_loop(shared: Arc<Shared>) {
             Err(_) => break,
         };
 
-        if let Some(current) = current {
-            if generation != last_generation {
-                last_generation = generation;
-                decode_playlist(&shared, generation, current);
-            }
+        if let Some(current) = current
+            && generation != last_generation
+        {
+            last_generation = generation;
+            decode_playlist(&shared, generation, current);
         }
 
         if let Ok(desired) = shared.desired.lock() {
-            let _ = shared
-                .wake
-                .wait_timeout(desired, Duration::from_millis(50));
+            let _ = shared.wake.wait_timeout(desired, Duration::from_millis(50));
         }
     }
 }
@@ -627,8 +623,7 @@ fn convert_channels(input: &[f32], source: usize, target: usize, out: &mut Vec<f
     }
 
     if source == 1 {
-        for frame in 0..frames {
-            let sample = input[frame];
+        for &sample in input.iter().take(frames) {
             for _ in 0..target {
                 out.push(sample);
             }
@@ -737,10 +732,21 @@ mod tests {
     }
 
     #[test]
-    fn decoder_reads_a_fixture_when_provided() {
-        let Ok(path) = std::env::var("MELOS_TEST_AUDIO") else {
-            return;
-        };
+    fn decoder_reads_bundled_format_fixtures() {
+        for extension in ["wav", "flac", "mp3", "m4a", "ogg"] {
+            check_fixture(extension);
+        }
+    }
+
+    fn fixture(extension: &str) -> String {
+        format!(
+            "{}/tests/fixtures/tone.{extension}",
+            env!("CARGO_MANIFEST_DIR")
+        )
+    }
+
+    fn check_fixture(extension: &str) {
+        let path = fixture(extension);
         let hint = std::path::Path::new(&path)
             .extension()
             .and_then(|extension| extension.to_str())
@@ -756,14 +762,16 @@ mod tests {
         while decoder.next_chunk(&mut chunk).unwrap() {
             samples += chunk.len();
         }
-        assert!(samples > 0);
+        let frames = samples / decoder.channels() as usize;
+        assert!(
+            (frames as i64 - 44_100).abs() < 4096,
+            "{extension}: {frames} frames"
+        );
     }
 
     #[test]
-    fn decoder_can_seek_when_a_fixture_is_provided() {
-        let Ok(path) = std::env::var("MELOS_TEST_AUDIO") else {
-            return;
-        };
+    fn decoder_seeks_in_bundled_flac_fixture() {
+        let path = fixture("flac");
         let hint = std::path::Path::new(&path)
             .extension()
             .and_then(|extension| extension.to_str())
@@ -771,9 +779,56 @@ mod tests {
         let source = crate::source::open_file(std::path::Path::new(&path)).unwrap();
         let mut decoder = Decoder::open(source, hint.as_deref()).unwrap();
 
-        decoder.seek_ms(30_000).unwrap();
+        decoder.seek_ms(500).unwrap();
         let mut chunk = Vec::new();
         assert!(decoder.next_chunk(&mut chunk).unwrap());
         assert!(!chunk.is_empty());
+    }
+
+    #[test]
+    fn gapless_output_keeps_every_sample_and_advances_track() {
+        let shared = Arc::new(Shared::new(44_100, 2));
+        shared.playing.store(true, Ordering::Relaxed);
+        shared.desired.lock().unwrap().next = Some(StreamSpec {
+            url: fixture("mp3"),
+            hint: Some("mp3".into()),
+            duration_ms: Some(1000),
+        });
+        // Both one-second tracks fit in the three-second output buffer.
+        decode_playlist(
+            &shared,
+            0,
+            StreamSpec {
+                url: fixture("flac"),
+                hint: Some("flac".into()),
+                duration_ms: Some(1000),
+            },
+        );
+        let mut samples = Vec::new();
+        while !shared.decoder_done.load(Ordering::Relaxed)
+            || !shared.queue.lock().unwrap().is_empty()
+        {
+            let len = shared.queue.lock().unwrap().len().min(4096);
+            if len == 0 {
+                thread::yield_now();
+                continue;
+            }
+            let mut out = vec![0.0f32; len - len % 2];
+            fill(&mut out, &shared, 2);
+            samples.extend(out);
+            update_position(&shared);
+        }
+        assert!(shared.error.lock().unwrap().is_none());
+        assert_eq!(shared.track_index.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.underruns.load(Ordering::Relaxed), 0);
+        assert!((samples.len() as i64 - 44_100 * 2 * 2).abs() < 8192);
+        let boundary = 44_100 * 2;
+        let rms = |values: &[f32]| {
+            (values.iter().map(|value| value * value).sum::<f32>() / values.len() as f32).sqrt()
+        };
+        assert!(
+            rms(&samples[boundary - 882..boundary + 882]) > 0.02,
+            "silence at boundary"
+        );
     }
 }

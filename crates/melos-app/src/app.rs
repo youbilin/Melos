@@ -1,7 +1,4 @@
-//! Application shell and the M4 data views.
-//!
-//! Playback is still driven by placeholder state; wiring the player engine and
-//! the queue happens in M5.
+//! Desktop views and playback orchestration.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -12,8 +9,8 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::*;
 use melos_api::{
-    Album, AlbumWithSongs, Artist, ArtistWithAlbums, Client, Credentials, SearchResult,
-    ServerInfo, Song, StreamQuality,
+    Album, AlbumWithSongs, Artist, ArtistWithAlbums, Client, Credentials, SearchResult, ServerInfo,
+    Song, StreamQuality,
 };
 use melos_core::Settings;
 use melos_player::{Engine, StreamSpec};
@@ -28,6 +25,19 @@ const QUEUE_WIDTH: f32 = 288.0;
 const CONTENT_PADDING: f32 = 64.0;
 const CARD_MIN: f32 = 160.0;
 const CARD_GAP: f32 = 24.0;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SliderKind {
+    Progress,
+    Volume,
+}
+
+#[derive(Clone, Copy)]
+struct SliderDrag {
+    kind: SliderKind,
+    bounds: Bounds<Pixels>,
+    fraction: f32,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -69,6 +79,8 @@ pub struct Root {
     playing: bool,
     queue_open: bool,
     volume: f32,
+    slider_drag: Option<SliderDrag>,
+    pending_stars: HashMap<String, Option<String>>,
 
     server: Entity<TextInput>,
     username: Entity<TextInput>,
@@ -89,6 +101,7 @@ pub struct Root {
     cover_requests: HashSet<String>,
     settings: Entity<Settings>,
     smtc: Option<smtc::Smtc>,
+    smoke_reported: bool,
 
     client: Option<Client>,
     engine: Option<Engine>,
@@ -105,6 +118,11 @@ pub struct Root {
 impl Root {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let settings = Settings::load();
+        let volume = if settings.volume.is_finite() {
+            settings.volume.clamp(0.0, 1.0)
+        } else {
+            0.8
+        };
         let server = cx.new(|cx| {
             let mut input = TextInput::new("http://192.168.1.10:4533", cx);
             input.set_content(settings.server.clone(), cx);
@@ -130,7 +148,9 @@ impl Root {
             view: View::Home,
             playing: false,
             queue_open: false,
-            volume: 0.8,
+            volume,
+            slider_drag: None,
+            pending_stars: HashMap::new(),
             server,
             username,
             password,
@@ -148,6 +168,7 @@ impl Root {
             cover_requests: HashSet::new(),
             settings: saved_settings,
             smtc: None,
+            smoke_reported: false,
             client: None,
             engine: Engine::new().ok(),
             queue: Vec::new(),
@@ -159,6 +180,10 @@ impl Root {
             scrobbled_playing: false,
             scrobbled_submitted: false,
         };
+
+        if let Some(engine) = root.engine.as_ref() {
+            engine.set_volume(volume);
+        }
 
         cx.spawn(async move |this, cx| {
             loop {
@@ -197,7 +222,7 @@ impl Root {
                             smtc::MediaCommand::Previous => this.play_previous(cx),
                         }
                     }
-                    let animated = this.sync_engine();
+                    let animated = this.sync_engine(cx);
                     if had_responses || animated || (this.now_playing.is_some() && this.playing) {
                         cx.notify();
                     }
@@ -268,7 +293,14 @@ impl Root {
                 self.cover_requests.remove(&id);
             }
             Response::Scrobbled => {}
-            Response::Starred => {}
+            Response::Starred { id, error } => {
+                if let Some(previous) = self.pending_stars.remove(&id)
+                    && let Some(error) = error
+                {
+                    self.patch_album_star(&id, previous);
+                    self.error = Some(format!("收藏更新失败：{error}"));
+                }
+            }
             Response::Error(error) => {
                 self.error = Some(error);
                 self.connecting = false;
@@ -299,12 +331,143 @@ impl Root {
         let password = self.password.read(cx).content().to_owned();
         let settings = self.settings.clone();
 
-        let _ = settings.update(cx, |settings, _| {
-            settings.server = server;
-            settings.username = username;
-            settings.set_password(&password);
-            settings.save().ok();
+        let result = settings.update(
+            cx,
+            |settings, _| -> Result<(), melos_core::settings::SettingsError> {
+                settings.server = server;
+                settings.username = username;
+                if !password.is_empty() {
+                    settings.set_password(&password)?;
+                }
+                settings.save()
+            },
+        );
+        if let Err(error) = result {
+            self.error = Some(format!("设置保存失败：{error}"));
+        }
+    }
+
+    fn save_playback_settings(&mut self, cx: &mut Context<Self>) {
+        let result = self.settings.update(cx, |settings, _| {
+            settings.volume = self.volume;
+            settings.save()
         });
+        if let Err(error) = result {
+            self.error = Some(format!("设置保存失败：{error}"));
+        }
+    }
+
+    fn stream_quality(&self, cx: &Context<Self>) -> StreamQuality {
+        self.settings
+            .read(cx)
+            .max_bit_rate
+            .map(|max_bit_rate| StreamQuality::Transcode { max_bit_rate })
+            .unwrap_or(StreamQuality::Original)
+    }
+
+    fn set_quality(&mut self, bitrate: Option<u32>, cx: &mut Context<Self>) {
+        let result = self.settings.update(cx, |settings, _| {
+            settings.max_bit_rate = bitrate;
+            settings.save()
+        });
+        if let Err(error) = result {
+            self.error = Some(format!("设置保存失败：{error}"));
+        }
+        cx.notify();
+    }
+
+    fn settings_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let settings = self.settings.read(cx);
+        let server = settings.server.clone();
+        let username = settings.username.clone();
+        let quality = settings.max_bit_rate;
+        let mut choices = div().flex().gap_2();
+        for (label, bitrate) in [
+            ("原始音质", None),
+            ("128 kbps", Some(128)),
+            ("192 kbps", Some(192)),
+            ("320 kbps", Some(320)),
+        ] {
+            choices = choices.child(ui::ghost_button(
+                label,
+                label,
+                quality == bitrate,
+                cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                    this.set_quality(bitrate, cx)
+                }),
+            ));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_6()
+            .child(section(
+                "服务器",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(ui::muted_label(server))
+                    .child(ui::muted_label(username))
+                    .child(ui::ghost_button(
+                        "disconnect",
+                        "切换服务器",
+                        false,
+                        cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                            if let Some(engine) = this.engine.as_ref() {
+                                engine.stop();
+                            }
+                            this.playing = false;
+                            this.connected = false;
+                            this.client = None;
+                            this.queue.clear();
+                            this.now_playing = None;
+                            this.albums.clear();
+                            this.artists.clear();
+                            this.covers.clear();
+                            this.cover_requests.clear();
+                            this.pending_stars.clear();
+                            this.detail = None;
+                            this.artist_view = None;
+                            this.search_result = None;
+                            this.api = ApiWorker::new();
+                            this.error = None;
+                            if let Some(saved) = this.settings.read(cx).password() {
+                                this.password
+                                    .update(cx, |input, cx| input.set_content(saved, cx));
+                            }
+                            if let Some(smtc) = this.smtc.as_ref() {
+                                smtc.set_status(None);
+                            }
+                            cx.notify();
+                        }),
+                    ))
+                    .into_any_element(),
+            ))
+            .child(section(
+                "播放音质",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(choices)
+                    .child(ui::muted_label(
+                        "设置用于下一次开始的播放；无法本地解码的格式自动转为 MP3。",
+                    ))
+                    .into_any_element(),
+            ))
+            .child(section(
+                "音量",
+                div()
+                    .flex()
+                    .gap_3()
+                    .child(self.volume_slider(cx))
+                    .child(ui::muted_label(format!(
+                        "{}%",
+                        (self.volume * 100.0).round() as u32
+                    )))
+                    .into_any_element(),
+            ))
     }
 
     fn connect(&mut self, cx: &mut Context<Self>) {
@@ -321,7 +484,10 @@ impl Root {
         self.connecting = true;
         self.error = None;
 
-        match Client::new(&server, Credentials::new(username.clone(), password.clone())) {
+        match Client::new(
+            &server,
+            Credentials::new(username.clone(), password.clone()),
+        ) {
             Ok(client) => self.client = Some(client),
             Err(error) => {
                 self.connecting = false;
@@ -358,11 +524,12 @@ impl Root {
             return;
         };
 
-        let spec = stream_spec(client, &song);
+        let quality = self.stream_quality(cx);
+        let spec = stream_spec(client, &song, quality);
         let next = self
             .queue
             .get(self.queue_index + 1)
-            .map(|song| stream_spec(client, song));
+            .map(|song| stream_spec(client, song, quality));
         let duration = spec.duration_ms.unwrap_or(0);
 
         let Some(engine) = self.engine.as_ref() else {
@@ -425,17 +592,32 @@ impl Root {
         };
         let starred = album.starred.is_none();
         let id = album.id.clone();
-
-        if let Some(detail) = self.detail.as_mut() {
-            detail.album.starred = if starred {
-                Some("now".to_owned())
-            } else {
-                None
-            };
+        if self.pending_stars.contains_key(&id) {
+            return;
         }
-
+        self.pending_stars.insert(id.clone(), album.starred.clone());
+        self.patch_album_star(&id, if starred { Some("now".into()) } else { None });
+        self.error = None;
         self.api.send(Request::Star { id, starred });
         cx.notify();
+    }
+
+    fn patch_album_star(&mut self, id: &str, starred: Option<String>) {
+        let patch = |album: &mut Album| {
+            if album.id == id {
+                album.starred = starred.clone();
+            }
+        };
+        self.albums.iter_mut().for_each(&patch);
+        if let Some(detail) = self.detail.as_mut() {
+            patch(&mut detail.album);
+        }
+        if let Some(artist) = self.artist_view.as_mut() {
+            artist.album.iter_mut().for_each(&patch);
+        }
+        if let Some(result) = self.search_result.as_mut() {
+            result.album.iter_mut().for_each(patch);
+        }
     }
 
     fn star_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -461,9 +643,11 @@ impl Root {
                 rgb(theme::TEXT_FAINT)
             })
             .child(if starred { "★" } else { "☆" })
-            .on_click(cx.listener(|this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
-                this.toggle_star(cx);
-            }))
+            .on_click(
+                cx.listener(|this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
+                    this.toggle_star(cx);
+                }),
+            )
     }
 
     fn seek_fraction(&mut self, fraction: f32, cx: &mut Context<Self>) {
@@ -496,7 +680,49 @@ impl Root {
         cx.notify();
     }
 
-    /// Click-to-seek progress bar.
+    fn begin_slider(
+        &mut self,
+        kind: SliderKind,
+        bounds: Bounds<Pixels>,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.slider_drag = Some(SliderDrag {
+            kind,
+            bounds,
+            fraction: 0.0,
+        });
+        self.move_slider(position, cx);
+    }
+
+    fn move_slider(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(drag) = self.slider_drag.as_mut() else {
+            return;
+        };
+        drag.fraction =
+            ((position.x - drag.bounds.origin.x) / drag.bounds.size.width).clamp(0.0, 1.0);
+        let kind = drag.kind;
+        let fraction = drag.fraction;
+        match kind {
+            SliderKind::Progress => {
+                self.position_ms = (f64::from(fraction) * self.duration_ms as f64) as u64
+            }
+            SliderKind::Volume => self.set_volume_fraction(fraction, cx),
+        }
+        cx.notify();
+    }
+
+    fn end_slider(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.move_slider(position, cx);
+        if let Some(drag) = self.slider_drag.take() {
+            match drag.kind {
+                SliderKind::Progress => self.seek_fraction(drag.fraction, cx),
+                SliderKind::Volume => self.save_playback_settings(cx),
+            }
+        }
+    }
+
+    /// Drag previews position; release performs a single network seek.
     fn progress_slider(&self, fraction: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
         let paint_bounds = bounds.clone();
@@ -514,9 +740,7 @@ impl Root {
                 MouseButton::Left,
                 cx.listener(move |this: &mut Root, event: &MouseDownEvent, _, cx| {
                     if let Some(b) = input_bounds.get() {
-                        let fraction =
-                            ((event.position.x - b.origin.x) / b.size.width).clamp(0.0, 1.0);
-                        this.seek_fraction(fraction, cx);
+                        this.begin_slider(SliderKind::Progress, b, event.position, cx);
                     }
                 }),
             )
@@ -533,7 +757,7 @@ impl Root {
             )
     }
 
-    /// Click-to-set volume bar.
+    /// Volume follows the pointer while dragging.
     fn volume_slider(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
         let paint_bounds = bounds.clone();
@@ -551,9 +775,7 @@ impl Root {
                 MouseButton::Left,
                 cx.listener(move |this: &mut Root, event: &MouseDownEvent, _, cx| {
                     if let Some(b) = input_bounds.get() {
-                        let fraction =
-                            ((event.position.x - b.origin.x) / b.size.width).clamp(0.0, 1.0);
-                        this.set_volume_fraction(fraction, cx);
+                        this.begin_slider(SliderKind::Volume, b, event.position, cx);
                     }
                 }),
             )
@@ -572,14 +794,18 @@ impl Root {
 
     /// Pulls the engine snapshot into the UI state. Returns true when a redraw
     /// is warranted.
-    fn sync_engine(&mut self) -> bool {
+    fn sync_engine(&mut self, cx: &Context<Self>) -> bool {
         let Some(engine) = self.engine.as_ref() else {
             return false;
         };
         let snapshot = engine.snapshot();
         let mut changed = false;
 
-        if snapshot.position_ms != self.position_ms {
+        if !self
+            .slider_drag
+            .is_some_and(|drag| drag.kind == SliderKind::Progress)
+            && snapshot.position_ms != self.position_ms
+        {
             self.position_ms = snapshot.position_ms;
             changed = true;
         }
@@ -595,8 +821,7 @@ impl Root {
         if snapshot.track_index > self.last_track_index {
             let advance = (snapshot.track_index - self.last_track_index) as usize;
             self.last_track_index = snapshot.track_index;
-            self.queue_index =
-                (self.queue_index + advance).min(self.queue.len().saturating_sub(1));
+            self.queue_index = (self.queue_index + advance).min(self.queue.len().saturating_sub(1));
             self.now_playing = self.queue.get(self.queue_index).cloned();
             self.position_ms = 0;
             self.duration_ms = self
@@ -608,10 +833,10 @@ impl Root {
             self.scrobbled_playing = false;
             self.scrobbled_submitted = false;
 
-            if let (Some(client), Some(engine)) = (self.client.as_ref(), self.engine.as_ref()) {
-                if let Some(next) = self.queue.get(self.queue_index + 1) {
-                    engine.set_next(stream_spec(client, next));
-                }
+            if let (Some(client), Some(engine)) = (self.client.as_ref(), self.engine.as_ref())
+                && let Some(next) = self.queue.get(self.queue_index + 1)
+            {
+                engine.set_next(stream_spec(client, next, self.stream_quality(cx)));
             }
             changed = true;
         }
@@ -643,9 +868,7 @@ impl Root {
             changed = true;
         }
 
-        if changed
-            && let Some(smtc) = self.smtc.as_ref()
-        {
+        if changed && let Some(smtc) = self.smtc.as_ref() {
             match self.now_playing.as_ref() {
                 Some(song) => {
                     smtc.update(
@@ -694,7 +917,11 @@ impl Root {
 
     fn connect_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let connect_button = ui::primary_button(
-            if self.connecting { "连接中…" } else { "连接" },
+            if self.connecting {
+                "连接中…"
+            } else {
+                "连接"
+            },
             !self.connecting,
             cx.listener(|this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
                 this.connect(cx);
@@ -764,6 +991,13 @@ impl Root {
             .bg(theme::backdrop())
             .text_color(rgb(theme::TEXT))
             .child(main)
+            .child(
+                div()
+                    .px_4()
+                    .text_xs()
+                    .text_color(rgb(0xE06C75))
+                    .child(self.error.clone().unwrap_or_default()),
+            )
             .child(self.player_bar(cx))
     }
 
@@ -868,7 +1102,7 @@ impl Root {
                 View::Artists => self.artists_view(cx),
                 View::Playlists => placeholder("歌单视图将在 v1.1 接入").into_any_element(),
                 View::Search => self.search_view(window, cx).into_any_element(),
-                View::Settings => placeholder("设置页将在 M5 接入").into_any_element(),
+                View::Settings => self.settings_view(cx).into_any_element(),
             }
         };
 
@@ -884,12 +1118,7 @@ impl Root {
 
     // ------------------------------------------------------------------ albums
 
-    fn album_grid(
-        &self,
-        albums: &[Album],
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn album_grid(&self, albums: &[Album], window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let columns = grid_columns(window, self.queue_open);
 
         let mut cards = Vec::with_capacity(albums.len());
@@ -948,9 +1177,11 @@ impl Root {
                     .text_color(rgb(theme::TEXT_MUTED))
                     .child(artist),
             )
-            .on_click(cx.listener(move |this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
-                this.open_album(id.clone(), cx);
-            }))
+            .on_click(
+                cx.listener(move |this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
+                    this.open_album(id.clone(), cx);
+                }),
+            )
     }
 
     fn detail_view(&self, album: &AlbumWithSongs, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1083,15 +1314,13 @@ impl Root {
                     .items_center()
                     .gap_2()
                     .child(div().flex_1().child(self.search.clone()))
-                    .child(
-                        div().w(px(88.)).child(ui::primary_button(
-                            "搜索",
-                            true,
-                            cx.listener(|this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
-                                this.run_search(cx);
-                            }),
-                        )),
-                    ),
+                    .child(div().w(px(88.)).child(ui::primary_button(
+                        "搜索",
+                        true,
+                        cx.listener(|this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
+                            this.run_search(cx);
+                        }),
+                    ))),
             )
             .child(results)
     }
@@ -1131,10 +1360,7 @@ impl Root {
         }
 
         if !result.album.is_empty() {
-            sections = sections.child(section(
-                "专辑",
-                self.album_grid(&result.album, window, cx),
-            ));
+            sections = sections.child(section("专辑", self.album_grid(&result.album, window, cx)));
         }
 
         if !result.song.is_empty() {
@@ -1182,11 +1408,7 @@ impl Root {
             .bg(rgba(0x0C0C10E6))
             .border_t_1()
             .border_color(rgb(theme::BORDER))
-            .child(
-                div()
-                    .size(px(48.))
-                    .child(self.cover(cover_id, 0)),
-            )
+            .child(div().size(px(48.)).child(self.cover(cover_id, 0)))
             .child(
                 div()
                     .flex()
@@ -1238,9 +1460,7 @@ impl Root {
                     .child(ui::muted_label(format_duration(Some(
                         (self.position_ms / 1000) as u32,
                     ))))
-                    .child(
-                        div().flex_1().child(self.progress_slider(fraction, cx)),
-                    )
+                    .child(div().flex_1().child(self.progress_slider(fraction, cx)))
                     .child(ui::muted_label(format_duration(Some(
                         (self.duration_ms / 1000) as u32,
                     )))),
@@ -1316,12 +1536,59 @@ impl Render for Root {
         if self.smtc.is_none() {
             self.smtc = Some(smtc::Smtc::attach(window));
         }
-
-        if self.connected {
+        if !self.smoke_reported
+            && let Some(path) = std::env::var_os("MELOS_SMOKE_REPORT")
+        {
+            self.smoke_reported = true;
+            let controls = self.smtc.as_ref().expect("SMTC initialized");
+            #[cfg(windows)]
+            let published = controls
+                .publish("Melos 测试曲目", "测试艺人", 1000, 60_000)
+                .is_ok();
+            #[cfg(not(windows))]
+            let published = false;
+            controls.set_status(Some(false));
+            let report = format!(
+                "{{\"smtc_available\":{},\"metadata_published\":{},\"audio_device_available\":{}}}",
+                controls.available(),
+                published,
+                self.engine.is_some()
+            );
+            std::fs::write(path, report).expect("write smoke report");
+            cx.spawn(async move |_, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(1000))
+                    .await;
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        }
+        let content = if self.connected {
             self.shell(window, cx).into_any_element()
         } else {
             self.connect_view(cx).into_any_element()
-        }
+        };
+        div()
+            .id("app-root")
+            .size_full()
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if event.dragging() {
+                    this.move_slider(event.position, cx);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                    this.end_slider(event.position, cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                    this.end_slider(event.position, cx);
+                }),
+            )
+            .child(content)
     }
 }
 
@@ -1365,42 +1632,47 @@ fn section(title: &'static str, content: AnyElement) -> impl IntoElement {
         .flex()
         .flex_col()
         .gap_2()
-        .child(div().text_sm().text_color(rgb(theme::TEXT_MUTED)).child(title))
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child(title),
+        )
         .child(content)
 }
 
-    fn song_row(
+fn song_row(
     index: usize,
     song: &Song,
     songs: Arc<Vec<Song>>,
     cx: &mut Context<Root>,
 ) -> impl IntoElement {
-        div()
-            .id(format!("song-{}-{}", song.id, index))
-            .flex()
-            .items_center()
-            .gap_3()
-            .px_3()
-            .py_2()
-            .rounded_md()
-            .cursor_pointer()
-            .hover(|style| style.bg(rgba(0xFFFFFF0A)))
-            .child(
-                div()
-                    .w(px(28.))
-                    .text_xs()
-                    .text_color(rgb(theme::TEXT_FAINT))
-                    .child(format!("{}", song.track.unwrap_or(index as u32 + 1))),
-            )
-            .child(div().flex_1().text_sm().child(song.title.clone()))
-            .child(ui::muted_label(song.artist.clone().unwrap_or_default()))
-            .child(ui::muted_label(format_duration(song.duration)))
-            .on_click(
-                cx.listener(move |this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
-                    this.play_songs((*songs).clone(), index, cx);
-                }),
-            )
-    }
+    div()
+        .id(format!("song-{}-{}", song.id, index))
+        .flex()
+        .items_center()
+        .gap_3()
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .cursor_pointer()
+        .hover(|style| style.bg(rgba(0xFFFFFF0A)))
+        .child(
+            div()
+                .w(px(28.))
+                .text_xs()
+                .text_color(rgb(theme::TEXT_FAINT))
+                .child(format!("{}", song.track.unwrap_or(index as u32 + 1))),
+        )
+        .child(div().flex_1().text_sm().child(song.title.clone()))
+        .child(ui::muted_label(song.artist.clone().unwrap_or_default()))
+        .child(ui::muted_label(format_duration(song.duration)))
+        .on_click(
+            cx.listener(move |this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
+                this.play_songs((*songs).clone(), index, cx);
+            }),
+        )
+}
 
 fn format_duration(seconds: Option<u32>) -> String {
     let seconds = seconds.unwrap_or(0);
@@ -1434,9 +1706,9 @@ fn paint_track(bounds: Bounds<Pixels>, track: f32, fraction: f32, window: &mut W
     ));
 }
 
-fn stream_spec(client: &Client, song: &Song) -> StreamSpec {
+fn stream_spec(client: &Client, song: &Song, quality: StreamQuality) -> StreamSpec {
     StreamSpec {
-        url: client.stream_url(song, StreamQuality::Original),
+        url: client.stream_url(song, quality),
         hint: song.suffix.clone(),
         duration_ms: song.duration.map(|seconds| u64::from(seconds) * 1000),
     }
@@ -1475,8 +1747,7 @@ fn placeholder(message: &'static str) -> impl IntoElement {
 /// content area instead of leaving a strip of empty space on the right.
 fn grid_columns(window: &Window, queue_open: bool) -> usize {
     let width = window.viewport_size().width.as_f32();
-    let reserved =
-        SIDEBAR_WIDTH + if queue_open { QUEUE_WIDTH } else { 0.0 } + CONTENT_PADDING;
+    let reserved = SIDEBAR_WIDTH + if queue_open { QUEUE_WIDTH } else { 0.0 } + CONTENT_PADDING;
     let available = (width - reserved).max(CARD_MIN);
     (((available + CARD_GAP) / (CARD_MIN + CARD_GAP)).floor() as usize).clamp(1, 10)
 }

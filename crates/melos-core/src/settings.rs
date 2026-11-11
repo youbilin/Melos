@@ -22,9 +22,9 @@ pub enum SettingsError {
     Dpapi(&'static str),
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
-    /// Last connected server URL, e.g. `http://10.159.39.64:4533/`.
+    /// Last connected server URL.
     #[serde(default)]
     pub server: String,
     /// Last username.
@@ -33,6 +33,27 @@ pub struct Settings {
     /// DPAPI-protected password, hex encoded. Empty when unset.
     #[serde(default)]
     pub password_protected: String,
+    #[serde(default = "default_volume")]
+    pub volume: f32,
+    /// None preserves the original format; otherwise request MP3 at this bitrate.
+    #[serde(default)]
+    pub max_bit_rate: Option<u32>,
+}
+
+fn default_volume() -> f32 {
+    0.8
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            server: String::new(),
+            username: String::new(),
+            password_protected: String::new(),
+            volume: default_volume(),
+            max_bit_rate: None,
+        }
+    }
 }
 
 impl Settings {
@@ -59,16 +80,16 @@ impl Settings {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        let temporary = path.with_extension("json.tmp");
+        fs::write(&temporary, serde_json::to_string_pretty(self)?)?;
+        fs::rename(&temporary, &path)?;
         Ok(())
     }
 
     /// Sets the plaintext password; it is DPAPI-encrypted before storage.
-    pub fn set_password(&mut self, password: &str) {
-        self.password_protected = match protect(password.as_bytes()) {
-            Ok(blob) => hex_encode(&blob),
-            Err(_) => String::new(),
-        };
+    pub fn set_password(&mut self, password: &str) -> Result<(), SettingsError> {
+        self.password_protected = hex_encode(&protect(password.as_bytes())?);
+        Ok(())
     }
 
     /// Decrypts the stored password, or `None` when absent or undecryptable.
@@ -85,9 +106,7 @@ impl Settings {
 
 #[cfg(windows)]
 fn protect(data: &[u8]) -> Result<Vec<u8>, SettingsError> {
-    use windows::Win32::Security::Cryptography::{
-        CryptProtectData, CRYPT_INTEGER_BLOB,
-    };
+    use windows::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptProtectData};
 
     unsafe {
         let input = CRYPT_INTEGER_BLOB {
@@ -106,21 +125,18 @@ fn protect(data: &[u8]) -> Result<Vec<u8>, SettingsError> {
         )
         .map_err(|_| SettingsError::Dpapi("CryptProtectData failed"))?;
 
-        let slice =
-            std::slice::from_raw_parts(output.pbData, output.cbData as usize);
+        let slice = std::slice::from_raw_parts(output.pbData, output.cbData as usize);
         let bytes = slice.to_vec();
-        windows::Win32::Foundation::LocalFree(Some(
-            windows::Win32::Foundation::HLOCAL(output.pbData as *mut _),
-        ));
+        windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(
+            output.pbData as *mut _,
+        )));
         Ok(bytes)
     }
 }
 
 #[cfg(windows)]
 fn unprotect(data: &[u8]) -> Result<Vec<u8>, SettingsError> {
-    use windows::Win32::Security::Cryptography::{
-        CryptUnprotectData, CRYPT_INTEGER_BLOB,
-    };
+    use windows::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptUnprotectData};
 
     unsafe {
         let input = CRYPT_INTEGER_BLOB {
@@ -139,26 +155,40 @@ fn unprotect(data: &[u8]) -> Result<Vec<u8>, SettingsError> {
         )
         .map_err(|_| SettingsError::Dpapi("CryptUnprotectData failed"))?;
 
-        let slice =
-            std::slice::from_raw_parts(output.pbData, output.cbData as usize);
+        let slice = std::slice::from_raw_parts(output.pbData, output.cbData as usize);
         let bytes = slice.to_vec();
-        windows::Win32::Foundation::LocalFree(Some(
-            windows::Win32::Foundation::HLOCAL(output.pbData as *mut _),
-        ));
+        windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(
+            output.pbData as *mut _,
+        )));
         Ok(bytes)
     }
 }
 
-#[cfg(windows)]
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-#[cfg(windows)]
 fn hex_decode(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
     (0..text.len() / 2)
         .map(|i| u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).ok())
         .collect()
+}
+
+#[cfg(not(windows))]
+fn protect(_: &[u8]) -> Result<Vec<u8>, SettingsError> {
+    Err(SettingsError::Dpapi(
+        "credential storage is currently Windows-only",
+    ))
+}
+
+#[cfg(not(windows))]
+fn unprotect(_: &[u8]) -> Result<Vec<u8>, SettingsError> {
+    Err(SettingsError::Dpapi(
+        "credential storage is currently Windows-only",
+    ))
 }
 
 #[cfg(test)]
@@ -166,15 +196,31 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(windows)]
     fn roundtrip_password() {
         let mut settings = Settings::default();
-        settings.set_password("996699");
-        assert_eq!(settings.password().as_deref(), Some("996699"));
+        settings.set_password("test-password-中文").unwrap();
+        assert_eq!(settings.password().as_deref(), Some("test-password-中文"));
     }
 
     #[test]
     fn empty_password_is_none() {
         let settings = Settings::default();
         assert!(settings.password().is_none());
+    }
+
+    #[test]
+    fn old_settings_get_playback_defaults() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"server":"https://example.test"}"#).unwrap();
+        assert_eq!(settings.volume, 0.8);
+        assert_eq!(settings.max_bit_rate, None);
+    }
+
+    #[test]
+    fn malformed_password_blob_does_not_panic() {
+        for blob in ["0", "xx", "你", "é", "aé"] {
+            assert!(hex_decode(blob).is_none());
+        }
     }
 }

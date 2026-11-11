@@ -24,7 +24,7 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |_, cx| cx.new(|cx| app::Root::new(cx)),
+            |_, cx| cx.new(app::Root::new),
         )
         .expect("failed to open window");
 

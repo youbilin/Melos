@@ -3173,6 +3173,7 @@ dependencies = [
  "melos-api",
  "melos-core",
  "melos-player",
+ "raw-window-handle",
  "tokio",
  "tracing",
  "unicode-segmentation",

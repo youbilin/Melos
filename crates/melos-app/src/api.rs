@@ -53,15 +53,10 @@ pub enum Response {
     Album(Box<AlbumWithSongs>),
     Artist(Box<ArtistWithAlbums>),
     Search(Box<SearchResult>),
-    Cover {
-        id: String,
-        bytes: Vec<u8>,
-    },
-    CoverFailed {
-        id: String,
-    },
+    Cover { id: String, bytes: Vec<u8> },
+    CoverFailed { id: String },
     Scrobbled,
-    Starred,
+    Starred { id: String, error: Option<String> },
     Error(String),
 }
 
@@ -140,10 +135,7 @@ async fn handle(client: &mut Option<Client>, request: Request) -> Response {
             let Some(client) = client.as_ref() else {
                 return Response::Error("尚未连接服务器".into());
             };
-            match client
-                .album_list(AlbumListType::Newest, size, offset)
-                .await
-            {
+            match client.album_list(AlbumListType::Newest, size, offset).await {
                 Ok(albums) => Response::Albums(albums),
                 Err(error) => Response::Error(error.to_string()),
             }
@@ -211,12 +203,35 @@ async fn handle(client: &mut Option<Client>, request: Request) -> Response {
 
         Request::Star { id, starred } => {
             let Some(client) = client.as_ref() else {
-                return Response::Error("尚未连接服务器".into());
+                return Response::Starred {
+                    id,
+                    error: Some("尚未连接服务器".into()),
+                };
             };
-            if client.set_starred(&id, starred).await.is_err() {
-                // surface nothing: the optimistic UI state stays
-            }
-            Response::Starred
+            let error = client
+                .set_album_starred(&id, starred)
+                .await
+                .err()
+                .map(|error| error.to_string());
+            Response::Starred { id, error }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_star_retains_request_identity_for_rollback() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let response = runtime.block_on(handle(
+            &mut None,
+            Request::Star {
+                id: "album-42".into(),
+                starred: true,
+            },
+        ));
+        assert!(matches!(response, Response::Starred { id, error: Some(_) } if id == "album-42"));
     }
 }

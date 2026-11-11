@@ -2,7 +2,7 @@
 
 一个轻量的 Navidrome / OpenSubsonic 桌面客户端，Rust + GPUI 编写，Windows 优先，附带 TUI 模式。
 
-> 状态：**骨架阶段**。UI 与音频引擎尚未接入，详见 [调研方案](docs/00-research.md) 与 [实施计划](docs/01-implementation-plan.md)。
+> 状态：**v1.0 开发与验收阶段**。浏览、搜索和播放闭环已接通，正在收尾 Windows 分发与稳定性验证。详见 [实施计划](docs/01-implementation-plan.md) 与 [验收记录](docs/03-acceptance.md)。
 
 ## 设计约束
 
@@ -19,19 +19,19 @@
 ```
 crates/
   melos-api/      Subsonic / OpenSubsonic 客户端（认证、DTO、错误）
-  melos-player/   播放引擎抽象（symphonia + cpal 实现待接入）
-  melos-core/     领域逻辑：队列、缓存、设置、scrobble（无 UI 依赖）
+  melos-player/   symphonia + cpal 播放引擎、HTTP Range 与断流恢复
+  melos-core/     队列状态机、设置与凭据保存（无 UI 依赖）
   melos-app/      GPUI 桌面前端（唯一依赖 gpui 的 crate）
   melos-tui/      ratatui 终端前端（v1.1，复用 melos-core）
 docs/          调研与技术方案
 spikes/        独立技术验证工程（不进入 workspace）
 ```
 
-依赖方向严格单向：`melos-app → melos-core → melos-player → melos-api`，`melos-tui → melos-core`。
+桌面前端组合 `melos-core`、`melos-player` 与 `melos-api`；底层 crate 不依赖 GPUI。TUI 尚未实现。
 
 ## 构建
 
-本机默认的 `stable` 工具链是 1.92，低于 GPUI 社区版要求的 1.95；已安装的 1.99.0 可用：
+`rust-toolchain.toml` 固定 Rust 1.99.0；GPUI 最低要求 1.95。安装 MSVC Build Tools 和 Windows SDK 后构建：
 
 ```powershell
 rustc +1.99.0-x86_64-pc-windows-msvc --version
@@ -60,6 +60,11 @@ cmd /c '"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxilia
 - [x] **M3 `melos-app` 外壳**：GPUI 窗口、侧边栏、沉浸式背景、播放条、队列抽屉
 - [x] **M4 数据视图**：连接页、真实专辑/艺人/专辑详情、搜索（IME 输入框）、封面加载
 - [x] **M5 核心播放**：流播放、队列、播放控制、gapless、scrobble
-- [ ] M5 其余：进度/音量拖动、Star、SMTC、设置持久化
+- [x] M5 收尾：进度/音量拖动、专辑收藏与失败回滚、Windows SMTC 原生窗口绑定
+- [x] 设置与持久化：音质、音量、连接信息、DPAPI 密码保护与密码掩码
+- [x] 仓库自带音频测试素材，多格式解码、seek、gapless 与断流恢复回归测试
 - [ ] M6：打包分发
+- [ ] 发布验收：真实媒体键、两小时连续播放、完整应用性能目标
 - [ ] Phase 2：歌词、歌单、TUI
+
+Opus、WMA、APE、DSD 等无法本地解码的格式显式请求服务端转为 MP3。专辑分页/虚拟化、磁盘封面缓存和队列编辑仍待实现。

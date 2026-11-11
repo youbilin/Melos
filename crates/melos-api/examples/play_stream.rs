@@ -13,7 +13,10 @@ async fn main() {
     }
 
     let client = Client::new(&args[0], Credentials::new(&args[1], &args[2])).unwrap();
-    let albums = client.album_list(AlbumListType::Newest, 1, 0).await.unwrap();
+    let albums = client
+        .album_list(AlbumListType::Newest, 1, 0)
+        .await
+        .unwrap();
     let Some(album) = albums.first() else {
         eprintln!("no albums");
         return;

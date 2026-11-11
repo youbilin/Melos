@@ -100,18 +100,54 @@ fn paint_icon(icon: Icon, bounds: Bounds<Pixels>, color: Rgba, window: &mut Wind
     };
 
     match icon {
-        Icon::Play => fill_polygon(&[at(0.28, 0.16), at(0.82, 0.5), at(0.28, 0.84)], color, window),
+        Icon::Play => fill_polygon(
+            &[at(0.28, 0.16), at(0.82, 0.5), at(0.28, 0.84)],
+            color,
+            window,
+        ),
         Icon::Pause => {
-            fill_rect(at(0.28, 0.16), bounds.size.width * 0.16, bounds.size.height * 0.68, color, window);
-            fill_rect(at(0.56, 0.16), bounds.size.width * 0.16, bounds.size.height * 0.68, color, window);
+            fill_rect(
+                at(0.28, 0.16),
+                bounds.size.width * 0.16,
+                bounds.size.height * 0.68,
+                color,
+                window,
+            );
+            fill_rect(
+                at(0.56, 0.16),
+                bounds.size.width * 0.16,
+                bounds.size.height * 0.68,
+                color,
+                window,
+            );
         }
         Icon::Next => {
-            fill_polygon(&[at(0.18, 0.16), at(0.66, 0.5), at(0.18, 0.84)], color, window);
-            fill_rect(at(0.70, 0.16), bounds.size.width * 0.14, bounds.size.height * 0.68, color, window);
+            fill_polygon(
+                &[at(0.18, 0.16), at(0.66, 0.5), at(0.18, 0.84)],
+                color,
+                window,
+            );
+            fill_rect(
+                at(0.70, 0.16),
+                bounds.size.width * 0.14,
+                bounds.size.height * 0.68,
+                color,
+                window,
+            );
         }
         Icon::Prev => {
-            fill_rect(at(0.16, 0.16), bounds.size.width * 0.14, bounds.size.height * 0.68, color, window);
-            fill_polygon(&[at(0.82, 0.16), at(0.34, 0.5), at(0.82, 0.84)], color, window);
+            fill_rect(
+                at(0.16, 0.16),
+                bounds.size.width * 0.14,
+                bounds.size.height * 0.68,
+                color,
+                window,
+            );
+            fill_polygon(
+                &[at(0.82, 0.16), at(0.34, 0.5), at(0.82, 0.84)],
+                color,
+                window,
+            );
         }
     }
 }
@@ -175,7 +211,8 @@ pub fn primary_button(
     let base = if enabled {
         base.bg(rgb(theme::TEXT)).text_color(rgb(0x0B0B0C))
     } else {
-        base.bg(rgb(theme::BORDER)).text_color(rgb(theme::TEXT_FAINT))
+        base.bg(rgb(theme::BORDER))
+            .text_color(rgb(theme::TEXT_FAINT))
     };
 
     base.hover(move |style| if enabled { style.opacity(0.88) } else { style })
@@ -185,24 +222,6 @@ pub fn primary_button(
                 on_click(event, window, cx);
             }
         })
-}
-
-/// A non-interactive progress line.
-pub fn progress_bar(fraction: f32, height: f32) -> impl IntoElement {
-    let fraction = fraction.clamp(0.0, 1.0);
-
-    div()
-        .w_full()
-        .h(px(height))
-        .rounded_full()
-        .bg(rgb(theme::BORDER))
-        .child(
-            div()
-                .h_full()
-                .w(relative(fraction))
-                .rounded_full()
-                .bg(rgb(theme::TEXT)),
-        )
 }
 
 /// A small muted label used in the sidebar footer and settings.

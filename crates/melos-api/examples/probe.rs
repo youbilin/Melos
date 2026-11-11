@@ -30,9 +30,7 @@ async fn main() {
     match client.album_list(AlbumListType::Newest, 5, 0).await {
         Ok(albums) => {
             println!("albums: {}", albums.len());
-            let cover_id = albums
-                .iter()
-                .find_map(|album| album.cover_art.clone());
+            let cover_id = albums.iter().find_map(|album| album.cover_art.clone());
             for album in &albums {
                 println!(
                     "  {} — {} ({})",

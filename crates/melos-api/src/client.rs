@@ -6,8 +6,8 @@
 
 use std::time::Duration;
 
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
 use crate::auth::{self, Credentials};
@@ -48,8 +48,19 @@ impl Default for StreamQuality {
 pub fn can_decode(suffix: &str) -> bool {
     matches!(
         suffix.trim_start_matches('.').to_ascii_lowercase().as_str(),
-        "mp3" | "flac" | "ogg" | "oga" | "m4a" | "mp4" | "aac" | "alac" | "wav" | "aiff" | "aif"
-            | "caf" | "mka"
+        "mp3"
+            | "flac"
+            | "ogg"
+            | "oga"
+            | "m4a"
+            | "mp4"
+            | "aac"
+            | "alac"
+            | "wav"
+            | "aiff"
+            | "aif"
+            | "caf"
+            | "mka"
     )
 }
 
@@ -66,8 +77,7 @@ impl Client {
     /// A trailing `/rest` path is tolerated so a URL copied from the web UI
     /// still works.
     pub fn new(server: &str, credentials: Credentials) -> Result<Self, Error> {
-        let mut base =
-            reqwest::Url::parse(server).map_err(|e| Error::InvalidUrl(e.to_string()))?;
+        let mut base = reqwest::Url::parse(server).map_err(|e| Error::InvalidUrl(e.to_string()))?;
 
         if !matches!(base.scheme(), "http" | "https") {
             return Err(Error::InvalidUrl(format!(
@@ -77,7 +87,10 @@ impl Client {
         }
 
         let trimmed = base.path().trim_end_matches('/').to_string();
-        let trimmed = trimmed.strip_suffix("/rest").unwrap_or(&trimmed).to_string();
+        let trimmed = trimmed
+            .strip_suffix("/rest")
+            .unwrap_or(&trimmed)
+            .to_string();
         let path = if trimmed.is_empty() {
             "/".to_string()
         } else {
@@ -235,9 +248,7 @@ impl Client {
 
     /// `search3`: artists, albums and songs in one round trip.
     pub async fn search(&self, query: &str) -> Result<SearchResult, Error> {
-        let mut payload = self
-            .get("search3", &[("query", query.to_owned())])
-            .await?;
+        let mut payload = self.get("search3", &[("query", query.to_owned())]).await?;
 
         match payload.remove("searchResult3") {
             Some(value) => serde_json::from_value(value)
@@ -261,9 +272,7 @@ impl Client {
 
     /// `getPlaylist`
     pub async fn playlist(&self, id: &str) -> Result<PlaylistWithSongs, Error> {
-        let mut payload = self
-            .get("getPlaylist", &[("id", id.to_owned())])
-            .await?;
+        let mut payload = self.get("getPlaylist", &[("id", id.to_owned())]).await?;
         take(&mut payload, "playlist")
     }
 
@@ -333,6 +342,13 @@ impl Client {
         self.get(endpoint, &[("id", id.to_owned())]).await?;
         Ok(())
     }
+
+    /// Albums use `albumId`; `id` is reserved for songs in Subsonic.
+    pub async fn set_album_starred(&self, id: &str, starred: bool) -> Result<(), Error> {
+        let endpoint = if starred { "star" } else { "unstar" };
+        self.get(endpoint, &[("albumId", id.to_owned())]).await?;
+        Ok(())
+    }
 }
 
 fn take<T: DeserializeOwned>(payload: &mut Map<String, Value>, key: &str) -> Result<T, Error> {
@@ -394,8 +410,7 @@ mod tests {
     #[test]
     fn endpoint_carries_auth_but_not_the_password() {
         let url = client("http://example.test:4533").endpoint("ping", &[]);
-        let params: std::collections::HashMap<_, _> =
-            url.query_pairs().into_owned().collect();
+        let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
 
         assert_eq!(params.get("u").map(String::as_str), Some("alice"));
         assert_eq!(params.get("c").map(String::as_str), Some(CLIENT_ID));
@@ -514,5 +529,33 @@ mod tests {
         assert_eq!(result.artist.len(), 1);
         assert_eq!(result.album.len(), 1);
         assert_eq!(result.song.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn album_star_uses_album_id_and_surfaces_server_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            let len = socket.read(&mut buffer).await.unwrap();
+            let request = String::from_utf8_lossy(&buffer[..len]);
+            assert!(request.starts_with("GET /rest/star?"));
+            assert!(request.contains("albumId=album-42"));
+            assert!(!request.contains("&id="));
+            let body = r#"{"subsonic-response":{"status":"failed","error":{"code":50,"message":"not allowed"}}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        assert!(
+            client(&format!("http://{address}"))
+                .set_album_starred("album-42", true)
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
     }
 }

@@ -63,7 +63,7 @@ impl Queue {
         self.current()
     }
 
-    pub fn next(&mut self) -> Option<&Song> {
+    pub fn next_track(&mut self) -> Option<&Song> {
         let i = self.current?;
         if self.songs.is_empty() {
             return None;
@@ -129,23 +129,23 @@ mod tests {
     #[test]
     fn stops_at_end_without_repeat() {
         let mut q = queue(2);
-        assert_eq!(q.next().unwrap().id, "1");
-        assert!(q.next().is_none());
+        assert_eq!(q.next_track().unwrap().id, "1");
+        assert!(q.next_track().is_none());
     }
 
     #[test]
     fn wraps_with_repeat_all() {
         let mut q = queue(2);
         q.set_repeat(RepeatMode::All);
-        assert_eq!(q.next().unwrap().id, "1");
-        assert_eq!(q.next().unwrap().id, "0");
+        assert_eq!(q.next_track().unwrap().id, "1");
+        assert_eq!(q.next_track().unwrap().id, "0");
     }
 
     #[test]
     fn repeats_same_track_with_repeat_one() {
         let mut q = queue(2);
         q.set_repeat(RepeatMode::One);
-        assert_eq!(q.next().unwrap().id, "0");
+        assert_eq!(q.next_track().unwrap().id, "0");
     }
 
     #[test]

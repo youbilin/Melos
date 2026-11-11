@@ -1,5 +1,3 @@
-
-
 use std::ops::Range;
 
 use crate::theme;
@@ -7,9 +5,9 @@ use crate::theme;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString,
-    Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, hsla, point,
-    prelude::*, px, relative, rgb, rgba, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
+    SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, hsla,
+    point, prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::*;
 
@@ -698,7 +696,6 @@ impl Focusable for TextInput {
     }
 }
 
-
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
         Self::with_secure(placeholder, false, cx)
@@ -750,7 +747,6 @@ macro_rules! primary {
 }
 
 pub fn bind_keys(cx: &mut App) {
-
     cx.bind_keys([
         KeyBinding::new("backspace", Backspace, None),
         KeyBinding::new("delete", Delete, None),
