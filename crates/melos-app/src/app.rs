@@ -14,6 +14,7 @@ use melos_api::{
     PlaylistWithSongs, SearchResult, ServerInfo, Song, StreamQuality,
 };
 use melos_core::artwork::playback_cover_candidates;
+use melos_core::lyrics::Lyrics;
 use melos_core::{Queue, RepeatMode, Settings};
 use melos_player::{Engine, StreamSpec};
 
@@ -78,6 +79,7 @@ pub enum View {
     Albums,
     Playlists,
     Search,
+    Lyrics,
     Settings,
 }
 
@@ -89,6 +91,7 @@ impl View {
             Self::Albums => "专辑",
             Self::Playlists => "歌单",
             Self::Search => "搜索",
+            Self::Lyrics => "歌词",
             Self::Settings => "设置",
         }
     }
@@ -100,6 +103,7 @@ impl View {
             Self::Albums => "全部专辑",
             Self::Playlists => "你的歌单",
             Self::Search => "搜索艺人、专辑与歌曲",
+            Self::Lyrics => "跟随当前播放",
             Self::Settings => "连接与播放偏好",
         }
     }
@@ -158,6 +162,14 @@ pub struct Root {
     position_ms: u64,
     duration_ms: u64,
     last_track_index: u64,
+    lyrics: Vec<Lyrics>,
+    lyrics_track: usize,
+    lyrics_request: u64,
+    lyrics_loading: bool,
+    lyrics_error: Option<String>,
+    lyrics_scroll: ScrollHandle,
+    lyrics_active: Option<usize>,
+    lyrics_follow: bool,
     scrobbled_playing: bool,
     scrobbled_submitted: bool,
 }
@@ -243,6 +255,14 @@ impl Root {
             position_ms: 0,
             duration_ms: 0,
             last_track_index: 0,
+            lyrics: Vec::new(),
+            lyrics_track: 0,
+            lyrics_request: 0,
+            lyrics_loading: false,
+            lyrics_error: None,
+            lyrics_scroll: ScrollHandle::new(),
+            lyrics_active: None,
+            lyrics_follow: true,
             scrobbled_playing: false,
             scrobbled_submitted: false,
         };
@@ -306,6 +326,18 @@ impl Root {
 
     fn handle_response(&mut self, response: Response, cx: &mut Context<Self>) {
         match response {
+            Response::Lyrics {
+                request_id,
+                lyrics,
+                error,
+            } => {
+                if request_id == self.lyrics_request && self.now_playing.is_some() {
+                    self.lyrics = lyrics;
+                    self.lyrics_loading = false;
+                    self.lyrics_error = error;
+                    self.sync_lyrics();
+                }
+            }
             Response::Playlists(list) => {
                 self.playlists = list;
                 self.playlists_loading = false;
@@ -492,6 +524,14 @@ impl Root {
     }
 
     fn set_now_playing(&mut self, song: Song) {
+        if self
+            .now_playing
+            .as_ref()
+            .is_none_or(|current| current.id != song.id)
+        {
+            self.clear_lyrics();
+            self.request_lyrics(&song);
+        }
         self.playing_cover_ids = playback_cover_candidates(
             &song,
             &self.albums,
@@ -506,6 +546,42 @@ impl Root {
             }
         }
         self.now_playing = Some(song);
+    }
+
+    fn clear_lyrics(&mut self) {
+        self.lyrics_request = self.lyrics_request.wrapping_add(1);
+        self.lyrics.clear();
+        self.lyrics_track = 0;
+        self.lyrics_loading = false;
+        self.lyrics_error = None;
+        self.lyrics_active = None;
+        self.lyrics_scroll = ScrollHandle::new();
+        self.lyrics_follow = true;
+    }
+
+    fn request_lyrics(&mut self, song: &Song) {
+        self.lyrics_request = self.lyrics_request.wrapping_add(1);
+        self.lyrics_loading = true;
+        self.lyrics_error = None;
+        self.api.send_priority(Request::Lyrics {
+            request_id: self.lyrics_request,
+            song: Box::new(song.clone()),
+        });
+    }
+
+    fn sync_lyrics(&mut self) {
+        let active = self.lyrics.get(self.lyrics_track).and_then(|lyrics| {
+            let range = lyrics.active_range(self.position_ms);
+            (!range.is_empty()).then_some(range.start)
+        });
+        if active != self.lyrics_active {
+            self.lyrics_active = active;
+            if self.lyrics_follow
+                && let Some(index) = active
+            {
+                self.lyrics_scroll.scroll_to_item(index);
+            }
+        }
     }
 
     /// Persists the current connection fields for the next launch.
@@ -608,6 +684,7 @@ impl Root {
                             this.client = None;
                             this.queue.clear();
                             this.now_playing = None;
+                            this.clear_lyrics();
                             this.albums.clear();
                             this.album_offset = 0;
                             this.albums_loading = false;
@@ -894,6 +971,7 @@ impl Root {
                     engine.stop();
                 }
                 self.now_playing = None;
+                self.clear_lyrics();
                 self.playing_cover_ids.clear();
                 self.position_ms = 0;
                 self.duration_ms = 0;
@@ -1020,6 +1098,7 @@ impl Root {
         let target = (f64::from(fraction.clamp(0.0, 1.0)) * self.duration_ms as f64) as u64;
         engine.seek(target);
         self.position_ms = target;
+        self.sync_lyrics();
 
         if target < self.duration_ms / 2 {
             self.scrobbled_playing = false;
@@ -1221,6 +1300,7 @@ impl Root {
             }
         }
 
+        self.sync_lyrics();
         if snapshot.ended && self.playing {
             self.playing = false;
             changed = true;
@@ -1452,6 +1532,9 @@ impl Root {
     }
 
     fn body(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.view == View::Lyrics {
+            return self.lyrics_view(cx);
+        }
         if self.detail.is_none()
             && self.artist_view.is_none()
             && matches!(self.view, View::Home | View::Albums)
@@ -1475,6 +1558,7 @@ impl Root {
                 View::Playlists => self.playlists_view(cx).into_any_element(),
                 View::Search => self.search_view(window, cx).into_any_element(),
                 View::Settings => self.settings_view(cx).into_any_element(),
+                View::Lyrics => unreachable!("lyrics view handled above"),
             }
         };
 
@@ -2339,15 +2423,167 @@ impl Root {
                     .child(ui::muted_label("VOL"))
                     .child(self.volume_slider(cx)),
             )
-            .child(ui::ghost_button(
-                "queue",
-                "队列",
-                self.queue_open,
-                cx.listener(|this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
-                    this.queue_open = !this.queue_open;
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(ui::compact_button(
+                        "lyrics",
+                        "歌词",
+                        self.view == View::Lyrics,
+                        cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                            this.select(
+                                if this.view == View::Lyrics {
+                                    View::Home
+                                } else {
+                                    View::Lyrics
+                                },
+                                cx,
+                            );
+                        }),
+                    ))
+                    .child(ui::compact_button(
+                        "queue",
+                        "队列",
+                        self.queue_open,
+                        cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                            this.queue_open = !this.queue_open;
+                            cx.notify();
+                        }),
+                    )),
+            )
+    }
+
+    fn lyrics_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(song) = self.now_playing.as_ref() else {
+            return placeholder("选择一首歌曲查看歌词").into_any_element();
+        };
+        let mut content = div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .px_8()
+            .pb_8()
+            .gap_4()
+            .child(div().text_lg().child(song.title.clone()))
+            .child(ui::muted_label(song.artist.clone().unwrap_or_default()));
+        if self.lyrics_loading {
+            return content
+                .child(placeholder("正在加载歌词…"))
+                .into_any_element();
+        }
+        if let Some(error) = self.lyrics_error.as_ref() {
+            return content
+                .child(ui::muted_label(format!("歌词加载失败：{error}")))
+                .child(ui::ghost_button(
+                    "retry-lyrics",
+                    "重试",
+                    false,
+                    cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                        if let Some(song) = this.now_playing.clone() {
+                            this.request_lyrics(&song);
+                        }
+                        cx.notify();
+                    }),
+                ))
+                .into_any_element();
+        }
+        let Some(lyrics) = self.lyrics.get(self.lyrics_track) else {
+            return content.child(placeholder("暂无歌词")).into_any_element();
+        };
+        let mut controls =
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(ui::muted_label(if lyrics.synced {
+                    "同步歌词 · 点击行跳转"
+                } else {
+                    "纯文本歌词"
+                }));
+        if self.lyrics.len() > 1 {
+            controls = controls.child(ui::ghost_button(
+                "lyrics-language",
+                format!(
+                    "{} · {}/{}",
+                    lyrics.language.as_deref().unwrap_or("歌词"),
+                    self.lyrics_track + 1,
+                    self.lyrics.len()
+                ),
+                false,
+                cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                    this.lyrics_track = (this.lyrics_track + 1) % this.lyrics.len();
+                    this.lyrics_scroll = ScrollHandle::new();
+                    this.lyrics_active = None;
+                    this.sync_lyrics();
                     cx.notify();
                 }),
-            ))
+            ));
+        }
+        if lyrics.synced {
+            controls = controls.child(ui::ghost_button(
+                "lyrics-follow",
+                "跟随播放",
+                self.lyrics_follow,
+                cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                    this.lyrics_follow = !this.lyrics_follow;
+                    if this.lyrics_follow
+                        && let Some(index) = this.lyrics_active
+                    {
+                        this.lyrics_scroll.scroll_to_item(index);
+                    }
+                    cx.notify();
+                }),
+            ));
+        }
+        content = content.child(controls);
+        let active = lyrics.active_range(self.position_ms);
+        let mut lines = div()
+            .id("lyrics-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.lyrics_scroll)
+            .flex()
+            .flex_col()
+            .gap_2();
+        for (index, line) in lyrics.lines.iter().enumerate() {
+            let start = line.start_ms;
+            lines = lines.child(
+                div()
+                    .id(format!("lyric-line-{index}"))
+                    .flex_shrink_0()
+                    .p_3()
+                    .rounded_md()
+                    .text_lg()
+                    .text_color(rgb(if active.contains(&index) {
+                        theme::TEXT
+                    } else {
+                        theme::TEXT_MUTED
+                    }))
+                    .when(active.contains(&index), |style| style.bg(rgba(0xFFFFFF14)))
+                    .when(start.is_some(), |style| {
+                        style
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgba(0xFFFFFF0A)))
+                    })
+                    .child(if line.text.is_empty() {
+                        " ".to_owned()
+                    } else {
+                        line.text.clone()
+                    })
+                    .on_click(cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                        if let Some(start) = start
+                            && this.duration_ms > 0
+                        {
+                            this.seek_fraction(start as f32 / this.duration_ms as f32, cx);
+                        }
+                    })),
+            );
+        }
+        content.child(lines).into_any_element()
     }
 
     fn queue_drawer(&self, cx: &mut Context<Self>) -> impl IntoElement {

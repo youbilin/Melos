@@ -159,6 +159,40 @@ pub struct PlaylistWithSongs {
     pub entry: Vec<Song>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StructuredLyrics {
+    #[serde(default)]
+    pub lang: Option<String>,
+    #[serde(default)]
+    pub offset: i64,
+    #[serde(default)]
+    pub synced: bool,
+    #[serde(default)]
+    pub line: Vec<LyricsLine>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LyricsLine {
+    #[serde(default)]
+    pub start: Option<u64>,
+    #[serde(default)]
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LyricsList {
+    #[serde(default)]
+    pub structured_lyrics: Vec<StructuredLyrics>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PlainLyrics {
+    #[serde(default)]
+    pub value: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlbumListType {
     Newest,

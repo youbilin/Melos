@@ -5,6 +5,7 @@
 
 pub mod artwork;
 pub mod cover_cache;
+pub mod lyrics;
 pub mod queue;
 pub mod settings;
 

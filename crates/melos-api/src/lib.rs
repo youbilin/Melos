@@ -13,6 +13,6 @@ pub use client::{
 };
 pub use error::Error;
 pub use model::{
-    Album, AlbumListType, AlbumWithSongs, Artist, ArtistWithAlbums, Playlist, PlaylistWithSongs,
-    SearchResult, ServerInfo, Song,
+    Album, AlbumListType, AlbumWithSongs, Artist, ArtistWithAlbums, LyricsLine, PlainLyrics,
+    Playlist, PlaylistWithSongs, SearchResult, ServerInfo, Song, StructuredLyrics,
 };

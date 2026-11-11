@@ -338,6 +338,40 @@ impl Client {
         Ok(())
     }
 
+    /// OpenSubsonic songLyrics extension; an empty list means no embedded lyrics.
+    pub async fn lyrics_by_song_id(&self, id: &str) -> Result<Vec<StructuredLyrics>, Error> {
+        let response = self
+            .send(self.endpoint("getLyricsBySongId", &[("id", id.to_owned())]))
+            .await?;
+        if matches!(response.status().as_u16(), 404 | 405 | 501) {
+            return Err(Error::NotFound);
+        }
+        let mut payload = Self::decode_response(response).await?;
+        match payload.remove("lyricsList") {
+            Some(value) => {
+                let list: LyricsList = serde_json::from_value(value)
+                    .map_err(|error| Error::Decode(format!("lyricsList: {error}")))?;
+                Ok(list.structured_lyrics)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Original Subsonic fallback, which may return plain text or LRC.
+    pub async fn lyrics(&self, artist: &str, title: &str) -> Result<Option<PlainLyrics>, Error> {
+        let mut payload = self
+            .get(
+                "getLyrics",
+                &[("artist", artist.to_owned()), ("title", title.to_owned())],
+            )
+            .await?;
+        if payload.contains_key("lyrics") {
+            take(&mut payload, "lyrics").map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Builds a `stream` URL for one song.
     ///
     /// The format is always explicit: leaving it out lets the server pick its
@@ -449,6 +483,37 @@ mod tests {
 
     fn client(server: &str) -> Client {
         Client::new(server, Credentials::new("alice", "secret")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn lyrics_parse_timed_and_unsynced_tracks_and_legacy_value() {
+        let url = serve_once(r#"{"subsonic-response":{"status":"ok","lyricsList":{"structuredLyrics":[{"lang":"eng","offset":-100,"synced":true,"line":[{"start":2000,"value":"Timed"}]},{"synced":false,"line":[{"value":"Plain"}]}]}}}"#).await;
+        let tracks = client(&url).lyrics_by_song_id("song-1").await.unwrap();
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].offset, -100);
+        assert_eq!(tracks[0].line[0].start, Some(2000));
+        assert_eq!(tracks[1].line[0].start, None);
+        let url = serve_once(
+            r#"{"subsonic-response":{"status":"ok","lyrics":{"value":"[00:01.00]Text"}}}"#,
+        )
+        .await;
+        assert_eq!(
+            client(&url)
+                .lyrics("Artist", "Title")
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+            "[00:01.00]Text"
+        );
+        let url = serve_once(r#"{"subsonic-response":{"status":"ok"}}"#).await;
+        assert!(
+            client(&url)
+                .lyrics_by_song_id("song-1")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// Serves exactly one HTTP request with a fixed JSON body.

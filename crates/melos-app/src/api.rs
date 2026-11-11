@@ -12,8 +12,13 @@ use melos_api::{
     PlaylistWithSongs, SearchResult, ServerInfo,
 };
 use melos_core::cover_cache::CoverCache;
+use melos_core::lyrics::{self, Lyrics};
 
 pub enum Request {
+    Lyrics {
+        request_id: u64,
+        song: Box<melos_api::Song>,
+    },
     Connect {
         server: String,
         username: String,
@@ -65,6 +70,11 @@ pub enum Request {
 }
 
 pub enum Response {
+    Lyrics {
+        request_id: u64,
+        lyrics: Vec<Lyrics>,
+        error: Option<String>,
+    },
     Connected(Box<ServerInfo>),
     Albums {
         albums: Vec<Album>,
@@ -202,6 +212,30 @@ fn run(requests: Receiver<Request>, priority: Receiver<Request>, responses: Send
 
 async fn handle(client: &mut Option<Client>, request: Request) -> Response {
     match request {
+        Request::Lyrics { request_id, song } => {
+            let result = match client.as_ref() {
+                Some(client) => lyrics::fetch(client, &song).await,
+                None => {
+                    return Response::Lyrics {
+                        request_id,
+                        lyrics: Vec::new(),
+                        error: Some("尚未连接服务器".into()),
+                    };
+                }
+            };
+            match result {
+                Ok(lyrics) => Response::Lyrics {
+                    request_id,
+                    lyrics,
+                    error: None,
+                },
+                Err(error) => Response::Lyrics {
+                    request_id,
+                    lyrics: Vec::new(),
+                    error: Some(error.to_string()),
+                },
+            }
+        }
         Request::Playlists => {
             let Some(client) = client.as_ref() else {
                 return Response::Error("尚未连接服务器".into());
@@ -382,6 +416,26 @@ async fn handle(client: &mut Option<Client>, request: Request) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_lyrics_retains_request_generation() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let response = runtime.block_on(handle(
+            &mut None,
+            Request::Lyrics {
+                request_id: 42,
+                song: Box::default(),
+            },
+        ));
+        assert!(matches!(
+            response,
+            Response::Lyrics {
+                request_id: 42,
+                error: Some(_),
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn failed_star_retains_request_identity_for_rollback() {
