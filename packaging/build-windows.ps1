@@ -17,7 +17,7 @@ try {
             $vcvars = $candidates | Sort-Object -Descending | Select-Object -First 1
         }
         if (-not $vcvars) { throw 'MSVC Build Tools with the C++ workload and Windows SDK are required.' }
-        & cmd /d /s /c "`"$vcvars`" && cargo build --release --locked -p melos-app"
+        & cmd /d /s /c "`"$vcvars`" && cargo build --release --locked -p melos-app -p melos-tui"
         if ($LASTEXITCODE -ne 0) { throw 'Release build failed.' }
     }
     $binary = Join-Path $repoRoot 'target/release/melos.exe'
@@ -27,6 +27,9 @@ try {
     $stage = Join-Path $repoRoot ('output/package-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force $outputDir, $stage | Out-Null
     Copy-Item -LiteralPath $binary -Destination $stage
+    $terminalBinary = Join-Path $repoRoot 'target/release/melos-tui.exe'
+    if (-not (Test-Path -LiteralPath $terminalBinary)) { throw 'Terminal release binary does not exist.' }
+    Copy-Item -LiteralPath $terminalBinary -Destination $stage
     Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $repoRoot 'packaging/windows/README.txt') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $repoRoot 'packaging/THIRD_PARTY_NOTICES.md') -Destination $stage

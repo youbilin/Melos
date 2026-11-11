@@ -24,12 +24,12 @@ crates/
   melos-player/   symphonia + cpal 播放引擎、HTTP Range 与断流恢复
   melos-core/     队列状态机、设置与凭据保存（无 UI 依赖）
   melos-app/      GPUI 桌面前端（唯一依赖 gpui 的 crate）
-  melos-tui/      ratatui 终端前端（v1.1，复用 melos-core）
+  melos-tui/      ratatui 终端前端（复用队列、歌词与播放器）
 docs/          调研与技术方案
 spikes/        独立技术验证工程（不进入 workspace）
 ```
 
-桌面前端组合 `melos-core`、`melos-player` 与 `melos-api`；底层 crate 不依赖 GPUI。TUI 尚未实现。
+桌面与终端前端组合 `melos-core`、`melos-player` 与 `melos-api`；底层 crate 不依赖 UI 工具包。
 
 ## 构建
 
@@ -75,9 +75,11 @@ cmd /c '"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxilia
 - [x] M6 首版：release 优化、应用图标/版本信息、Windows 绿色版 ZIP 与校验和
 - [x] GitHub Actions：格式、测试、Clippy、底层依赖检查、Windows 构建与私有构建产物
 - [ ] 发布验收：真实媒体键、两小时连续播放、完整应用性能目标
-- [ ] Phase 2：TUI
+- [x] TUI 首版：专辑分页、歌单浏览/播放、歌曲搜索、队列编辑、随机/循环、同步/纯文本歌词
 
-Opus、WMA、APE、DSD 等无法本地解码的格式显式请求服务端转为 MP3。TUI 尚未实现；歌曲与队列长列表虚拟化仍可继续完善。歌词入口在播放栏右侧，支持切换服务端提供的歌词版本，关闭“跟随播放”后可自由滚动阅读。
+Opus、WMA、APE、DSD 等无法本地解码的格式显式请求服务端转为 MP3。桌面歌曲与队列长列表虚拟化仍可继续完善。歌词入口在播放栏右侧，支持切换服务端提供的歌词版本，关闭“跟随播放”后可自由滚动阅读。
+
+终端版先复用桌面保存的连接信息与密码，在交互终端中运行 `melos-tui.exe`（或开发时 `cargo run -p melos-tui --locked`）。`--help` 显示按键；1/2/3/4 切换专辑、歌单、队列、歌词，`/` 搜索歌曲，Enter 打开/播放，空格暂停，n/p 切歌，方向键 seek 或选条目。歌单编辑仍使用桌面；终端首版暂不支持艺人/专辑搜索、媒体键和独立连接表单。
 
 ## Windows 绿色版
 
@@ -85,7 +87,7 @@ Opus、WMA、APE、DSD 等无法本地解码的格式显式请求服务端转为
 ./packaging/build-windows.ps1
 ```
 
-产物在 `output/release/`，包含 ZIP 和 SHA256。程序要求 Windows 10 1903+ / Windows 11（x64）以及 Microsoft Visual C++ 2015–2022 Redistributable（x64）。当前 0.1.1 版本为开发预览，包含队列编辑、随机/循环、分页曲库、歌单与歌词。
+产物在 `output/release/`，包含 ZIP 和 SHA256。程序要求 Windows 10 1903+ / Windows 11（x64）以及 Microsoft Visual C++ 2015–2022 Redistributable（x64）。当前 0.1.1 版本为开发预览，包含桌面与终端程序，以及队列编辑、随机/循环、分页曲库、歌单与歌词。
 
 ```powershell
 # 无人值守的窗口初始化、SMTC 与空闲内存粗测

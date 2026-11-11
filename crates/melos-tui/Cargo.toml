@@ -12,3 +12,6 @@ path = "src/main.rs"
 melos-api = { path = "../melos-api" }
 melos-core = { path = "../melos-core" }
 melos-player = { path = "../melos-player" }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
+crossterm = "0.29"
+tokio.workspace = true

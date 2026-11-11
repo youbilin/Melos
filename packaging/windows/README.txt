@@ -1,6 +1,10 @@
 Melos 0.1.1 — development preview
 
 Extract this folder and run melos.exe on Windows 10 (1903+)/11 (x64).
+For terminal playback, first save a connection in the desktop app, then
+run melos-tui.exe in PowerShell or Windows Terminal. Use --help for keys.
+The terminal preview supports album/playlist browsing, song search,
+queue editing, playback modes and lyrics; playlist editing uses the desktop.
 Microsoft Visual C++ 2015-2022 Redistributable (x64) must be installed:
 https://aka.ms/vs/17/release/vc_redist.x64.exe
 Enter your Navidrome / OpenSubsonic server URL, username and password.

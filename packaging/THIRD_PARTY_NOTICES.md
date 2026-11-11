@@ -11,6 +11,7 @@ Principal dependencies include:
 | Symphonia | MPL-2.0 |
 | CPAL | Apache-2.0 |
 | Reqwest, Tokio, Serde, windows-rs | MIT OR Apache-2.0 |
+| Ratatui, Crossterm | MIT |
 
 The GPUI text input implementation derives from Zed's GPUI input example:
 https://github.com/zed-industries/zed/blob/main/crates/gpui/examples/input.rs
