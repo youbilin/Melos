@@ -425,7 +425,7 @@ cmd /c '"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxilia
 
 Phase 0 已结束。当前进入核心功能补齐与 Windows 预览验收，详细状态见 [项目进展](04-project-status.md)。
 
-1. 随机/循环播放、播放快捷键，与队列和预取联动。
+1. 随机/循环播放、播放快捷键已实现；继续实际交互验收。
 2. 可见界面、真实媒体键、真实 Navidrome 格式矩阵及两小时连续播放验收。
 3. 专辑分页、列表虚拟化、按需加载与磁盘封面缓存。
 4. 歌单 UI 与编辑、歌词；桌面稳定后推进 TUI。

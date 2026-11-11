@@ -755,6 +755,11 @@ impl TextInput {
         self.content.as_ref()
     }
 
+    pub fn contains_position(&self, position: Point<Pixels>) -> bool {
+        self.last_bounds
+            .is_some_and(|bounds| bounds.contains(&position))
+    }
+
     pub fn is_composing(&self) -> bool {
         self.marked_range.is_some()
     }

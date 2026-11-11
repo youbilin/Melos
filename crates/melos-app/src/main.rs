@@ -2,6 +2,7 @@
 
 mod api;
 mod app;
+mod shortcuts;
 mod smtc;
 mod theme;
 mod ui;

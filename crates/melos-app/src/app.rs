@@ -13,7 +13,7 @@ use melos_api::{
     Song, StreamQuality,
 };
 use melos_core::artwork::playback_cover_candidates;
-use melos_core::{Queue, Settings};
+use melos_core::{Queue, RepeatMode, Settings};
 use melos_player::{Engine, StreamSpec};
 
 use crate::api::{ApiWorker, Request, Response};
@@ -98,6 +98,7 @@ impl View {
 }
 
 pub struct Root {
+    focus_handle: FocusHandle,
     api: ApiWorker,
     view: View,
     playing: bool,
@@ -166,9 +167,13 @@ impl Root {
             input
         });
         let search = cx.new(|cx| TextInput::new("搜索艺人、专辑或歌曲", cx));
+        let mut queue = Queue::new();
+        queue.set_repeat(settings.repeat);
+        queue.set_shuffle(settings.shuffle);
         let saved_settings = cx.new(|_| settings);
 
         let root = Self {
+            focus_handle: cx.focus_handle(),
             api: ApiWorker::new(),
             view: View::Home,
             playing: false,
@@ -198,7 +203,7 @@ impl Root {
             smoke_reported: false,
             client: None,
             engine: Engine::new().ok(),
-            queue: Queue::new(),
+            queue,
             now_playing: None,
             position_ms: 0,
             duration_ms: 0,
@@ -396,6 +401,8 @@ impl Root {
     fn save_playback_settings(&mut self, cx: &mut Context<Self>) {
         let result = self.settings.update(cx, |settings, _| {
             settings.volume = self.volume;
+            settings.shuffle = self.queue.shuffle();
+            settings.repeat = self.queue.repeat();
             settings.save()
         });
         if let Err(error) = result {
@@ -516,6 +523,24 @@ impl Root {
                     )))
                     .into_any_element(),
             ))
+            .child(section(
+                "快捷键",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(ui::muted_label("空格：播放/暂停　← / →：后退/前进 5 秒"))
+                    .child(ui::muted_label(
+                        "Ctrl+← / →：上一首/下一首　Ctrl+↑ / ↓：音量 ±5%",
+                    ))
+                    .child(ui::muted_label(
+                        "Ctrl+S：随机　Ctrl+R：循环　Ctrl+Q：队列　Ctrl+F：搜索",
+                    ))
+                    .child(ui::muted_label(
+                        "输入框内保留输入和编辑按键；中文输入法组合期间不触发播放快捷键。",
+                    ))
+                    .into_any_element(),
+            ))
     }
 
     fn connect(&mut self, cx: &mut Context<Self>) {
@@ -575,7 +600,7 @@ impl Root {
         let spec = stream_spec(client, &song, quality);
         let upcoming = self
             .queue
-            .upcoming()
+            .playback_upcoming()
             .iter()
             .map(|song| stream_spec(client, song, quality))
             .collect();
@@ -587,7 +612,13 @@ impl Root {
             return;
         };
 
-        engine.play_queue(spec, upcoming);
+        let cycle = self
+            .queue
+            .playback_cycle()
+            .iter()
+            .map(|song| stream_spec(client, song, quality))
+            .collect();
+        engine.play_playlist(spec, upcoming, cycle);
 
         self.set_now_playing(song);
         self.position_ms = 0;
@@ -647,9 +678,14 @@ impl Root {
     fn refresh_upcoming(&mut self, cx: &Context<Self>) {
         if let (Some(client), Some(engine)) = (&self.client, &self.engine) {
             let quality = self.stream_quality(cx);
-            engine.replace_upcoming(
+            engine.replace_playlist(
                 self.queue
-                    .upcoming()
+                    .playback_upcoming()
+                    .iter()
+                    .map(|song| stream_spec(client, song, quality))
+                    .collect(),
+                self.queue
+                    .playback_cycle()
                     .iter()
                     .map(|song| stream_spec(client, song, quality))
                     .collect(),
@@ -740,6 +776,26 @@ impl Root {
         self.sync_engine(cx);
         self.queue.clear_upcoming();
         self.refresh_upcoming(cx);
+        cx.notify();
+    }
+
+    fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
+        self.sync_engine(cx);
+        self.queue.set_shuffle(!self.queue.shuffle());
+        self.refresh_upcoming(cx);
+        self.save_playback_settings(cx);
+        cx.notify();
+    }
+
+    fn cycle_repeat(&mut self, cx: &mut Context<Self>) {
+        self.sync_engine(cx);
+        self.queue.set_repeat(match self.queue.repeat() {
+            RepeatMode::Off => RepeatMode::All,
+            RepeatMode::All => RepeatMode::One,
+            RepeatMode::One => RepeatMode::Off,
+        });
+        self.refresh_upcoming(cx);
+        self.save_playback_settings(cx);
         cx.notify();
     }
 
@@ -980,7 +1036,7 @@ impl Root {
             let advance = (snapshot.track_index - self.last_track_index) as usize;
             self.last_track_index = snapshot.track_index;
             for _ in 0..advance {
-                self.queue.next_track();
+                self.queue.advance();
             }
             if let Some(song) = self.queue.current().cloned() {
                 self.set_now_playing(song);
@@ -1628,6 +1684,32 @@ impl Root {
             )
             .child(
                 div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(ui::ghost_button(
+                        "shuffle",
+                        "随机",
+                        self.queue.shuffle(),
+                        cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                            this.toggle_shuffle(cx);
+                        }),
+                    ))
+                    .child(ui::ghost_button(
+                        "repeat",
+                        match self.queue.repeat() {
+                            RepeatMode::Off => "循环关",
+                            RepeatMode::All => "列表循环",
+                            RepeatMode::One => "单曲循环",
+                        },
+                        self.queue.repeat() != RepeatMode::Off,
+                        cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                            this.cycle_repeat(cx);
+                        }),
+                    )),
+            )
+            .child(
+                div()
                     .flex_1()
                     .flex()
                     .items_center()
@@ -1806,6 +1888,9 @@ impl Root {
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if window.focused(cx).is_none() {
+            window.focus(&self.focus_handle, cx);
+        }
         if self.smtc.is_none() {
             self.smtc = Some(smtc::Smtc::attach(window));
         }
@@ -1849,8 +1934,71 @@ impl Render for Root {
         };
         div()
             .id("app-root")
+            .track_focus(&self.focus_handle)
             .size_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    let in_input = if this.connected {
+                        this.view == View::Search
+                            && this.search.read(cx).contains_position(event.position)
+                    } else {
+                        [&this.server, &this.username, &this.password]
+                            .iter()
+                            .any(|input| input.read(cx).contains_position(event.position))
+                    };
+                    if !in_input {
+                        window.focus(&this.focus_handle, cx);
+                    }
+                }),
+            )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let inputs = [&this.server, &this.username, &this.password, &this.search];
+                let editing = inputs
+                    .iter()
+                    .any(|input| input.read(cx).focus_handle(cx).is_focused(window));
+                let composing = inputs.iter().any(|input| {
+                    input.read(cx).focus_handle(cx).is_focused(window)
+                        && input.read(cx).is_composing()
+                });
+                if this.connected
+                    && let Some(shortcut) =
+                        crate::shortcuts::resolve(&event.keystroke, editing, composing)
+                {
+                    use crate::shortcuts::Shortcut;
+                    match shortcut {
+                        Shortcut::TogglePlayback => this.toggle_playback(cx),
+                        Shortcut::Next => this.play_next(cx),
+                        Shortcut::Previous => this.play_previous(cx),
+                        Shortcut::Seek(offset) => {
+                            this.sync_engine(cx);
+                            if this.duration_ms > 0 {
+                                let target = this
+                                    .position_ms
+                                    .saturating_add_signed(offset)
+                                    .min(this.duration_ms);
+                                this.seek_fraction(target as f32 / this.duration_ms as f32, cx);
+                            }
+                        }
+                        Shortcut::Volume(offset) => {
+                            this.set_volume_fraction(this.volume + f32::from(offset) / 100.0, cx);
+                            this.save_playback_settings(cx);
+                        }
+                        Shortcut::Shuffle => this.toggle_shuffle(cx),
+                        Shortcut::Repeat => this.cycle_repeat(cx),
+                        Shortcut::Queue => {
+                            this.queue_open = !this.queue_open;
+                            cx.notify();
+                        }
+                        Shortcut::Search => {
+                            this.select(View::Search, cx);
+                            let handle = this.search.read(cx).focus_handle(cx);
+                            window.focus(&handle, cx);
+                        }
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 if event.keystroke.key != "enter" || event.prefer_character_input {
                     return;
                 }

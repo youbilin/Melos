@@ -51,6 +51,7 @@ struct Desired {
     generation: u64,
     current: Option<StreamSpec>,
     upcoming: VecDeque<StreamSpec>,
+    cycle: Vec<StreamSpec>,
     resume: Option<DecodeTask>,
     decoding_start: u64,
     decoding_spec: Option<StreamSpec>,
@@ -99,6 +100,7 @@ impl Shared {
                 generation: 0,
                 current: None,
                 upcoming: VecDeque::new(),
+                cycle: Vec::new(),
                 resume: None,
                 decoding_start: 0,
                 decoding_spec: None,
@@ -179,6 +181,15 @@ impl Engine {
     }
 
     pub fn play_queue(&self, current: StreamSpec, upcoming: Vec<StreamSpec>) {
+        self.play_playlist(current, upcoming, vec![]);
+    }
+
+    pub fn play_playlist(
+        &self,
+        current: StreamSpec,
+        upcoming: Vec<StreamSpec>,
+        cycle: Vec<StreamSpec>,
+    ) {
         let mut desired = self.shared.desired.lock().expect("desired lock");
         let mut boundaries = self.shared.boundaries.lock().expect("boundaries lock");
         let mut queue = self.shared.queue.lock().expect("queue lock");
@@ -200,6 +211,7 @@ impl Engine {
 
         desired.current = Some(current);
         desired.upcoming = upcoming.into();
+        desired.cycle = cycle;
         desired.resume = None;
         desired.decoding_start = 0;
         desired.decoding_spec = None;
@@ -272,7 +284,11 @@ impl Engine {
     /// Keeps all remaining samples of the audible track and invalidates only
     /// future decoding. Editing the queue never restarts the audible track.
     pub fn replace_upcoming(&self, upcoming: Vec<StreamSpec>) {
-        replace_upcoming(&self.shared, upcoming);
+        self.replace_playlist(upcoming, vec![]);
+    }
+
+    pub fn replace_playlist(&self, upcoming: Vec<StreamSpec>, cycle: Vec<StreamSpec>) {
+        replace_upcoming(&self.shared, upcoming, cycle);
     }
 
     pub fn pause(&self) {
@@ -293,6 +309,7 @@ impl Engine {
             self.shared.revision.fetch_add(1, Ordering::AcqRel);
             desired.current = None;
             desired.upcoming.clear();
+            desired.cycle.clear();
             desired.resume = None;
             desired.seek = None;
             self.shared
@@ -457,12 +474,20 @@ where
     drop(queue);
 }
 
-fn replace_upcoming(shared: &Shared, upcoming: Vec<StreamSpec>) {
+fn take_next_spec(desired: &mut Desired) -> Option<StreamSpec> {
+    if desired.upcoming.is_empty() {
+        desired.upcoming.extend(desired.cycle.iter().cloned());
+    }
+    desired.upcoming.pop_front()
+}
+
+fn replace_upcoming(shared: &Shared, upcoming: Vec<StreamSpec>, cycle: Vec<StreamSpec>) {
     update_position(shared);
     let mut desired = shared.desired.lock().expect("desired lock");
     let mut boundaries = shared.boundaries.lock().expect("boundaries lock");
     let mut queue = shared.queue.lock().expect("queue lock");
     desired.upcoming = upcoming.into();
+    desired.cycle = cycle;
     advance_boundaries(shared, &mut boundaries);
     let Some(current) = boundaries.front().cloned() else {
         return;
@@ -479,7 +504,7 @@ fn replace_upcoming(shared: &Shared, upcoming: Vec<StreamSpec>) {
         queue.truncate(keep);
         boundaries.truncate(1);
         shared.revision.fetch_add(1, Ordering::AcqRel);
-        desired.resume = desired.upcoming.pop_front().map(|spec| DecodeTask {
+        desired.resume = take_next_spec(&mut desired).map(|spec| DecodeTask {
             spec,
             start_frame: end,
         });
@@ -556,6 +581,14 @@ fn decode_playlist(shared: &Arc<Shared>, token: DecodeToken, task: DecodeTask) {
             desired.decoding_spec = Some(spec.clone());
         }
         match decode_track(shared, token, &spec, produced) {
+            Some(0) => {
+                set_decode_error(
+                    shared,
+                    token,
+                    PlayerError::Decode("track contains no audio frames".into()),
+                );
+                return;
+            }
             Some(frames) => produced += frames,
             None => return,
         }
@@ -563,7 +596,7 @@ fn decode_playlist(shared: &Arc<Shared>, token: DecodeToken, task: DecodeTask) {
         next_spec = match shared.desired.lock() {
             Ok(mut desired) if is_current(shared, token) => {
                 desired.decoding_start = produced;
-                let next = desired.upcoming.pop_front();
+                let next = take_next_spec(&mut desired);
                 desired.decoding_spec = next.clone();
                 next
             }
@@ -1271,5 +1304,64 @@ mod tests {
         assert_eq!(engine.snapshot().track_index, 3);
         drop(engine);
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn repeated_audio_crosses_cycles_and_disabling_repeat_preserves_current() {
+        for single in [false, true] {
+            let engine = Engine {
+                shared: Arc::new(Shared::new(44_100, 2)),
+            };
+            let cycle = if single {
+                vec![spec("flac")]
+            } else {
+                vec![spec("flac"), spec("mp3")]
+            };
+            engine.play_playlist(
+                spec("flac"),
+                if single { vec![] } else { vec![spec("mp3")] },
+                cycle,
+            );
+            let shared = Arc::clone(&engine.shared);
+            let worker = thread::spawn(move || decode_loop(shared));
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while engine.shared.consumed_frames.load(Ordering::Relaxed) < 44_100 * 4 + 11_025 {
+                let available = engine.shared.queue.lock().unwrap().len() / 2;
+                if available > 0 {
+                    consume(&engine, available.min(1024));
+                }
+                assert!(!engine.snapshot().ended);
+                assert!(std::time::Instant::now() < deadline);
+                if available == 0 {
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+            engine.pause();
+            assert!(engine.snapshot().track_index >= 4);
+            let before = engine.snapshot().position_ms;
+            engine.replace_playlist(vec![], vec![]);
+            assert_eq!(engine.snapshot().position_ms, before);
+            assert!(!engine.snapshot().playing);
+            assert_eq!(engine.shared.boundaries.lock().unwrap().len(), 1);
+            engine.resume();
+            while !engine.snapshot().ended {
+                let available = engine.shared.queue.lock().unwrap().len() / 2;
+                if available > 0 {
+                    consume(&engine, available.min(1024));
+                }
+                assert!(std::time::Instant::now() < deadline);
+                if available == 0 {
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+            assert!(engine.snapshot().ended);
+            assert_eq!(
+                engine.shared.consumed_frames.load(Ordering::Relaxed),
+                44_100 * 5
+            );
+            assert!(engine.take_error().is_none());
+            drop(engine);
+            worker.join().unwrap();
+        }
     }
 }

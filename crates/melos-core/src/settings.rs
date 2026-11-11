@@ -38,6 +38,10 @@ pub struct Settings {
     /// None preserves the original format; otherwise request MP3 at this bitrate.
     #[serde(default)]
     pub max_bit_rate: Option<u32>,
+    #[serde(default)]
+    pub shuffle: bool,
+    #[serde(default)]
+    pub repeat: crate::RepeatMode,
 }
 
 fn default_volume() -> f32 {
@@ -52,6 +56,8 @@ impl Default for Settings {
             password_protected: String::new(),
             volume: default_volume(),
             max_bit_rate: None,
+            shuffle: false,
+            repeat: crate::RepeatMode::Off,
         }
     }
 }
@@ -215,6 +221,21 @@ mod tests {
             serde_json::from_str(r#"{"server":"https://example.test"}"#).unwrap();
         assert_eq!(settings.volume, 0.8);
         assert_eq!(settings.max_bit_rate, None);
+        assert!(!settings.shuffle);
+        assert_eq!(settings.repeat, crate::RepeatMode::Off);
+    }
+
+    #[test]
+    fn playback_modes_survive_settings_roundtrip() {
+        let settings = Settings {
+            shuffle: true,
+            repeat: crate::RepeatMode::One,
+            ..Default::default()
+        };
+        let restored: Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(restored.shuffle);
+        assert_eq!(restored.repeat, crate::RepeatMode::One);
     }
 
     #[test]
