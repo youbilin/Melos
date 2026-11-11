@@ -3168,6 +3168,7 @@ dependencies = [
 name = "melos-app"
 version = "0.1.0"
 dependencies = [
+ "embed-resource",
  "gpui-platform-gpui-unofficial",
  "gpui-unofficial",
  "melos-api",

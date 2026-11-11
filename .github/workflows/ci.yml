@@ -1,0 +1,51 @@
+name: Windows checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+          components: rustfmt, clippy
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Tests
+        run: cargo test --workspace --locked
+      - name: Thirty-second recovery
+        run: cargo test -p melos-player stream_recovers_after_thirty_seconds_offline --locked -- --ignored
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Domain dependency check
+        shell: pwsh
+        run: |
+          foreach ($crate in @('melos-core', 'melos-api', 'melos-player')) {
+            $tree = cargo tree -p $crate -e normal --locked
+            if ($LASTEXITCODE -ne 0 -or ($tree | Select-String 'gpui|ratatui')) {
+              throw "$crate must not depend on a UI toolkit"
+            }
+          }
+      - name: Windows portable package
+        shell: pwsh
+        run: ./packaging/build-windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: melos-windows-x64
+          path: output/release/*

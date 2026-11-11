@@ -24,6 +24,18 @@
 - 默认音频设备创建：通过。
 - 实际 WASAPI 播放一秒 FLAC → 一秒 MP3：两曲均播放完整，最终位置 1,000 ms，underrun 为 0（短时素材检查）。
 
+## Windows 绿色版与性能粗测
+
+- `packaging/build-windows.ps1`：通过；MSVC 自动定位、release 构建、ZIP/SHA256 生成。
+- 应用图标、0.1.0 版本资源已嵌入；DPI/系统兼容 manifest 由 GPUI 提供。
+- 完整应用 release exe：约 **13.24 MB**；ZIP：**5,886,756 字节**。
+- ZIP 校验和、解压前后 exe 哈希一致性：通过。
+- 解压后的 exe：隐藏启动、SMTC 绑定、中文元数据发布、音频设备创建均通过。
+- `packaging/measure-windows.ps1` 三次窗口初始化报告时间：**1,040.9 / 268.8 / 269.6 ms**；对应工作集 **47.54 / 47.96 / 48.07 MB**。
+- 以上为隐藏窗口初始化与短时空闲场景；不代表可见首帧、受控冷启动、大曲库或长时间播放内存。首次仍高于 1 秒，冷启动验收不标为通过。
+- 支持 Windows 10 1903+ / Windows 11 x64，需要系统安装 Visual C++ Redistributable。
+- GitHub Actions 配置格式、测试、30 秒恢复、Clippy、底层依赖检查与 Windows 绿色版构建，产物保留在私有仓库中；不发布 GitHub Release。
+
 ## 发布前待验收
 
 - [ ] 实际媒体键：播放/暂停、上一首/下一首，系统媒体面板。

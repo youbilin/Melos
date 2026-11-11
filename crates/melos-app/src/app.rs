@@ -1554,10 +1554,16 @@ impl Render for Root {
                 published,
                 self.engine.is_some()
             );
+            // Hidden Windows processes do not present frames. Record view
+            // initialization so diagnostics also work in unattended checks.
             std::fs::write(path, report).expect("write smoke report");
+            let seconds = std::env::var("MELOS_SMOKE_SECONDS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(1);
             cx.spawn(async move |_, cx| {
                 cx.background_executor()
-                    .timer(Duration::from_millis(1000))
+                    .timer(Duration::from_secs(seconds))
                     .await;
                 cx.update(|cx| cx.quit());
             })
@@ -1571,6 +1577,31 @@ impl Render for Root {
         div()
             .id("app-root")
             .size_full()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key != "enter" || event.prefer_character_input {
+                    return;
+                }
+                let focused = |input: &Entity<TextInput>| {
+                    input.read(cx).focus_handle(cx).is_focused(window)
+                        && !input.read(cx).is_composing()
+                };
+                if this.connected && focused(&this.search) {
+                    this.run_search(cx);
+                    cx.stop_propagation();
+                } else if !this.connected
+                    && !this.connecting
+                    && [
+                        this.server.clone(),
+                        this.username.clone(),
+                        this.password.clone(),
+                    ]
+                    .iter()
+                    .any(focused)
+                {
+                    this.connect(cx);
+                    cx.stop_propagation();
+                }
+            }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 if event.dragging() {
                     this.move_slider(event.position, cx);

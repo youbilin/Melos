@@ -19,6 +19,9 @@ tracing.workspace = true
 unicode-segmentation = "1"
 raw-window-handle = "0.6"
 
+[build-dependencies]
+embed-resource = "3.0.12"
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Foundation",

@@ -199,7 +199,39 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        self.content_offset(line.closest_index_for_x(position.x - bounds.left()))
+    }
+
+    fn display_offset(&self, offset: usize) -> usize {
+        if self.secure {
+            self.content
+                .char_indices()
+                .take_while(|(index, _)| *index < offset)
+                .count()
+                * '\u{2022}'.len_utf8()
+        } else {
+            offset
+        }
+    }
+
+    fn content_offset(&self, offset: usize) -> usize {
+        if self.secure {
+            self.content
+                .char_indices()
+                .nth(offset / '\u{2022}'.len_utf8())
+                .map(|(index, _)| index)
+                .unwrap_or(self.content.len())
+        } else {
+            offset
+        }
+    }
+
+    fn display_text(&self) -> SharedString {
+        if self.secure {
+            "\u{2022}".repeat(self.content.chars().count()).into()
+        } else {
+            self.content.clone()
+        }
     }
 
     fn select_to(&mut self, offset: usize, window: &Window, cx: &mut Context<Self>) {
@@ -413,17 +445,17 @@ impl EntityInputHandler for TextInput {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let last_layout = self.last_layout.as_ref()?;
-        if last_layout.text != self.content {
+        if last_layout.text != self.display_text() {
             return None;
         }
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
             point(
-                bounds.left() + last_layout.x_for_index(range.start),
+                bounds.left() + last_layout.x_for_index(self.display_offset(range.start)),
                 bounds.top(),
             ),
             point(
-                bounds.left() + last_layout.x_for_index(range.end),
+                bounds.left() + last_layout.x_for_index(self.display_offset(range.end)),
                 bounds.bottom(),
             ),
         ))
@@ -450,11 +482,11 @@ impl EntityInputHandler for TextInput {
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
 
-        if last_layout.text != self.content {
+        if last_layout.text != self.display_text() {
             return None;
         }
         let utf8_index = last_layout.closest_index_for_x(line_point.x);
-        Some(self.offset_to_utf16(utf8_index))
+        Some(self.offset_to_utf16(self.content_offset(utf8_index)))
     }
 }
 
@@ -512,18 +544,15 @@ impl Element for TextElement {
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
         let content = input.content.clone();
-        let selected_range = input.selected_range.clone();
-        let cursor = input.cursor_offset();
+        let selected_range = input.display_offset(input.selected_range.start)
+            ..input.display_offset(input.selected_range.end);
+        let cursor = input.display_offset(input.cursor_offset());
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
             (input.placeholder.clone(), hsla(0., 0., 1., 0.35))
         } else if input.secure {
-            // Same visual length; the underlying content is untouched.
-            (
-                "\u{2022}".repeat(content.chars().count()).into(),
-                style.color,
-            )
+            (input.display_text(), style.color)
         } else {
             (content, style.color)
         };
@@ -537,6 +566,8 @@ impl Element for TextElement {
             strikethrough: None,
         };
         let runs = if let Some(marked_range) = input.marked_range.as_ref() {
+            let marked_range =
+                input.display_offset(marked_range.start)..input.display_offset(marked_range.end);
             vec![
                 TextRun {
                     len: marked_range.start,
@@ -722,6 +753,10 @@ impl TextInput {
 
     pub fn content(&self) -> &str {
         self.content.as_ref()
+    }
+
+    pub fn is_composing(&self) -> bool {
+        self.marked_range.is_some()
     }
 
     pub fn set_content(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {

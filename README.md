@@ -55,16 +55,34 @@ cmd /c '"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxilia
 - [x] workspace 骨架、API 认证、队列状态机
 - [x] Phase 0（UI）：窗口 + 中文 IME 验证完成，选定 `gpui-unofficial`（[ADR-001](docs/adr/0001-ui-stack.md)）
 - [x] Phase 0（音频）：本地解码 + WASAPI 输出 + MP3 接缝验证完成
-- [x] **M1 `melos-api`**：认证、浏览、搜索、歌单、流 URL 能力矩阵、错误映射、重试（11 个测试）
-- [x] **M2 `melos-player`**：文件/HTTP 源、解码、gapless、seek、音量、位置（7 个测试）
+- [x] **M1 `melos-api`**：认证、浏览、搜索、歌单、流 URL 能力矩阵、错误映射、重试（12 个测试）
+- [x] **M2 `melos-player`**：文件/HTTP 源、解码、gapless、seek、音量、位置（10 个测试，含 30 秒恢复长测试）
 - [x] **M3 `melos-app` 外壳**：GPUI 窗口、侧边栏、沉浸式背景、播放条、队列抽屉
 - [x] **M4 数据视图**：连接页、真实专辑/艺人/专辑详情、搜索（IME 输入框）、封面加载
 - [x] **M5 核心播放**：流播放、队列、播放控制、gapless、scrobble
 - [x] M5 收尾：进度/音量拖动、专辑收藏与失败回滚、Windows SMTC 原生窗口绑定
 - [x] 设置与持久化：音质、音量、连接信息、DPAPI 密码保护与密码掩码
 - [x] 仓库自带音频测试素材，多格式解码、seek、gapless 与断流恢复回归测试
-- [ ] M6：打包分发
+- [x] M6 首版：release 优化、应用图标/版本信息、Windows 绿色版 ZIP 与校验和
+- [x] GitHub Actions：格式、测试、Clippy、底层依赖检查、Windows 构建与私有构建产物
 - [ ] 发布验收：真实媒体键、两小时连续播放、完整应用性能目标
 - [ ] Phase 2：歌词、歌单、TUI
 
 Opus、WMA、APE、DSD 等无法本地解码的格式显式请求服务端转为 MP3。专辑分页/虚拟化、磁盘封面缓存和队列编辑仍待实现。
+
+## Windows 绿色版
+
+```powershell
+./packaging/build-windows.ps1
+```
+
+产物在 `output/release/`，包含 ZIP 和 SHA256。程序要求 Windows 10 1903+ / Windows 11（x64）以及 Microsoft Visual C++ 2015–2022 Redistributable（x64）。当前版本为开发预览。
+
+```powershell
+# 无人值守的窗口初始化、SMTC 与空闲内存粗测
+./packaging/measure-windows.ps1
+# 显式运行 30 秒断流恢复验收
+cmd /c '"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && cargo test -p melos-player stream_recovers_after_thirty_seconds_offline -- --ignored'
+```
+
+项目保持私有；完成并验证的改动按批次提交、推送，见 [项目工作约定](AGENTS.md)。
