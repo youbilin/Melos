@@ -3153,7 +3153,7 @@ dependencies = [
 
 [[package]]
 name = "melos-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "md-5",
  "melos-player",
@@ -3166,7 +3166,7 @@ dependencies = [
 
 [[package]]
 name = "melos-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "embed-resource",
  "gpui-platform-gpui-unofficial",
@@ -3183,7 +3183,7 @@ dependencies = [
 
 [[package]]
 name = "melos-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs 6.0.0",
  "melos-api",
@@ -3197,7 +3197,7 @@ dependencies = [
 
 [[package]]
 name = "melos-player"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cpal",
  "reqwest",
@@ -3207,7 +3207,7 @@ dependencies = [
 
 [[package]]
 name = "melos-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "melos-api",
  "melos-core",

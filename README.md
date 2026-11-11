@@ -85,7 +85,7 @@ Opus、WMA、APE、DSD 等无法本地解码的格式显式请求服务端转为
 ./packaging/build-windows.ps1
 ```
 
-产物在 `output/release/`，包含 ZIP 和 SHA256。程序要求 Windows 10 1903+ / Windows 11（x64）以及 Microsoft Visual C++ 2015–2022 Redistributable（x64）。当前版本为开发预览。
+产物在 `output/release/`，包含 ZIP 和 SHA256。程序要求 Windows 10 1903+ / Windows 11（x64）以及 Microsoft Visual C++ 2015–2022 Redistributable（x64）。当前 0.1.1 版本为开发预览，包含队列编辑、随机/循环、分页曲库、歌单与歌词。
 
 ```powershell
 # 无人值守的窗口初始化、SMTC 与空闲内存粗测

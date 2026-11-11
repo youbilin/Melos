@@ -1495,7 +1495,10 @@ impl Root {
                             this.select(View::Settings, cx);
                         }),
                     ))
-                    .child(ui::muted_label("melos v0.1.0")),
+                    .child(ui::muted_label(concat!(
+                        "melos v",
+                        env!("CARGO_PKG_VERSION")
+                    ))),
             )
     }
 
