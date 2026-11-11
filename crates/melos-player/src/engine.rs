@@ -39,8 +39,9 @@ pub struct EngineSnapshot {
     pub volume: f32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Boundary {
+    spec: StreamSpec,
     start_frame: u64,
     base_ms: u64,
     duration_ms: u64,
@@ -49,8 +50,23 @@ struct Boundary {
 struct Desired {
     generation: u64,
     current: Option<StreamSpec>,
-    next: Option<StreamSpec>,
+    upcoming: VecDeque<StreamSpec>,
+    resume: Option<DecodeTask>,
+    decoding_start: u64,
+    decoding_spec: Option<StreamSpec>,
     seek: Option<u64>,
+}
+
+#[derive(Clone)]
+struct DecodeTask {
+    spec: StreamSpec,
+    start_frame: u64,
+}
+
+#[derive(Clone, Copy)]
+struct DecodeToken {
+    generation: u64,
+    revision: u64,
 }
 
 struct Shared {
@@ -71,6 +87,8 @@ struct Shared {
     track_index: AtomicU64,
     underruns: AtomicU64,
     shutdown: AtomicBool,
+    generation: AtomicU64,
+    revision: AtomicU64,
 }
 
 impl Shared {
@@ -80,7 +98,10 @@ impl Shared {
             desired: Mutex::new(Desired {
                 generation: 0,
                 current: None,
-                next: None,
+                upcoming: VecDeque::new(),
+                resume: None,
+                decoding_start: 0,
+                decoding_spec: None,
                 seek: None,
             }),
             wake: Condvar::new(),
@@ -98,6 +119,8 @@ impl Shared {
             track_index: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
+            revision: AtomicU64::new(0),
         }
     }
 
@@ -152,12 +175,20 @@ impl Engine {
 
     /// Starts a new playback generation.
     pub fn play(&self, current: StreamSpec, next: Option<StreamSpec>) {
-        if let Ok(mut queue) = self.shared.queue.lock() {
-            queue.clear();
-        }
-        if let Ok(mut boundaries) = self.shared.boundaries.lock() {
-            boundaries.clear();
-        }
+        self.play_queue(current, next.into_iter().collect());
+    }
+
+    pub fn play_queue(&self, current: StreamSpec, upcoming: Vec<StreamSpec>) {
+        let mut desired = self.shared.desired.lock().expect("desired lock");
+        let mut boundaries = self.shared.boundaries.lock().expect("boundaries lock");
+        let mut queue = self.shared.queue.lock().expect("queue lock");
+        desired.generation = desired.generation.wrapping_add(1);
+        self.shared
+            .generation
+            .store(desired.generation, Ordering::Release);
+        self.shared.revision.fetch_add(1, Ordering::AcqRel);
+        queue.clear();
+        boundaries.clear();
 
         self.shared.consumed_frames.store(0, Ordering::Relaxed);
         self.shared.position_ms.store(0, Ordering::Relaxed);
@@ -167,32 +198,81 @@ impl Engine {
         self.shared.decoder_done.store(false, Ordering::Relaxed);
         self.shared.playing.store(true, Ordering::Relaxed);
 
-        if let Ok(mut desired) = self.shared.desired.lock() {
-            desired.generation = desired.generation.wrapping_add(1);
-            desired.current = Some(current);
-            desired.next = next;
-            desired.seek = None;
-        }
+        desired.current = Some(current);
+        desired.upcoming = upcoming.into();
+        desired.resume = None;
+        desired.decoding_start = 0;
+        desired.decoding_spec = None;
+        desired.seek = None;
+        drop(queue);
+        drop(boundaries);
+        drop(desired);
         self.shared.wake.notify_all();
     }
 
     /// Seeks within the current track.
     pub fn seek(&self, position_ms: u64) {
-        if let Ok(mut desired) = self.shared.desired.lock()
-            && desired.current.is_some()
+        update_position(&self.shared);
+        let mut desired = self.shared.desired.lock().expect("desired lock");
+        let mut boundaries = self.shared.boundaries.lock().expect("boundaries lock");
+        let mut queue = self.shared.queue.lock().expect("queue lock");
+        advance_boundaries(&self.shared, &mut boundaries);
+        let Some(current) = boundaries
+            .front()
+            .map(|boundary| boundary.spec.clone())
+            .or_else(|| desired.current.clone())
+        else {
+            return;
+        };
+        let mut upcoming: VecDeque<_> = boundaries
+            .iter()
+            .skip(1)
+            .map(|boundary| boundary.spec.clone())
+            .collect();
+        if !boundaries.is_empty()
+            && !self.shared.decoder_done.load(Ordering::Relaxed)
+            && !boundaries
+                .iter()
+                .any(|boundary| boundary.start_frame == desired.decoding_start)
+            && let Some(spec) = desired.decoding_spec.clone()
         {
-            desired.seek = Some(position_ms);
+            upcoming.push_back(spec);
         }
+        upcoming.extend(desired.upcoming.drain(..));
+        desired.generation = desired.generation.wrapping_add(1);
+        self.shared
+            .generation
+            .store(desired.generation, Ordering::Release);
+        self.shared.revision.fetch_add(1, Ordering::AcqRel);
+        desired.current = Some(current);
+        desired.upcoming = upcoming;
+        desired.resume = None;
+        desired.decoding_start = 0;
+        desired.decoding_spec = None;
+        desired.seek = Some(position_ms);
+        boundaries.clear();
+        queue.clear();
+        self.shared.consumed_frames.store(0, Ordering::Relaxed);
+        self.shared
+            .position_ms
+            .store(position_ms, Ordering::Relaxed);
+        self.shared.decoder_done.store(false, Ordering::Relaxed);
+        self.shared.ended.store(false, Ordering::Relaxed);
+        drop(queue);
+        drop(boundaries);
+        drop(desired);
         self.shared.wake.notify_all();
     }
 
-    /// Sets the track that should follow the current one. Takes effect if the
-    /// decoder has not reached the end of the current track yet.
+    /// Replaces the next track, including any audio already prefetched for it.
     pub fn set_next(&self, next: StreamSpec) {
-        if let Ok(mut desired) = self.shared.desired.lock() {
-            desired.next = Some(next);
-        }
-        self.shared.wake.notify_all();
+        self.replace_upcoming(vec![next]);
+    }
+
+    /// Keeps all remaining samples of the audible track and invalidates only
+    /// future decoding. Editing the queue never restarts the audible track.
+    pub fn replace_upcoming(&self, upcoming: Vec<StreamSpec>) {
+        replace_upcoming(&self.shared, upcoming);
     }
 
     pub fn pause(&self) {
@@ -205,14 +285,22 @@ impl Engine {
 
     pub fn stop(&self) {
         self.shared.playing.store(false, Ordering::Relaxed);
-        if let Ok(mut queue) = self.shared.queue.lock() {
-            queue.clear();
-        }
         if let Ok(mut desired) = self.shared.desired.lock() {
             desired.generation = desired.generation.wrapping_add(1);
+            self.shared
+                .generation
+                .store(desired.generation, Ordering::Release);
+            self.shared.revision.fetch_add(1, Ordering::AcqRel);
             desired.current = None;
-            desired.next = None;
+            desired.upcoming.clear();
+            desired.resume = None;
             desired.seek = None;
+            self.shared
+                .boundaries
+                .lock()
+                .expect("boundaries lock")
+                .clear();
+            self.shared.queue.lock().expect("queue lock").clear();
         }
         self.shared.position_ms.store(0, Ordering::Relaxed);
         self.shared.ended.store(false, Ordering::Relaxed);
@@ -230,6 +318,7 @@ impl Engine {
     }
 
     pub fn snapshot(&self) -> EngineSnapshot {
+        update_position(&self.shared);
         EngineSnapshot {
             position_ms: self.shared.position_ms.load(Ordering::Relaxed),
             duration_ms: self.shared.duration_ms.load(Ordering::Relaxed),
@@ -362,30 +451,86 @@ where
         shared.ended.store(true, Ordering::Relaxed);
     }
 
-    drop(queue);
     shared
         .consumed_frames
         .fetch_add((consumed / channels) as u64, Ordering::Relaxed);
+    drop(queue);
+}
+
+fn replace_upcoming(shared: &Shared, upcoming: Vec<StreamSpec>) {
+    update_position(shared);
+    let mut desired = shared.desired.lock().expect("desired lock");
+    let mut boundaries = shared.boundaries.lock().expect("boundaries lock");
+    let mut queue = shared.queue.lock().expect("queue lock");
+    desired.upcoming = upcoming.into();
+    advance_boundaries(shared, &mut boundaries);
+    let Some(current) = boundaries.front().cloned() else {
+        return;
+    };
+    let future_decoding = desired.decoding_start > current.start_frame;
+    if boundaries.len() > 1 || future_decoding || shared.decoder_done.load(Ordering::Relaxed) {
+        let consumed = shared.consumed_frames.load(Ordering::Relaxed);
+        let end = boundaries
+            .get(1)
+            .map(|boundary| boundary.start_frame)
+            .or_else(|| future_decoding.then_some(desired.decoding_start))
+            .unwrap_or(consumed + (queue.len() / shared.channels()) as u64);
+        let keep = end.saturating_sub(consumed) as usize * shared.channels();
+        queue.truncate(keep);
+        boundaries.truncate(1);
+        shared.revision.fetch_add(1, Ordering::AcqRel);
+        desired.resume = desired.upcoming.pop_front().map(|spec| DecodeTask {
+            spec,
+            start_frame: end,
+        });
+        desired.decoding_spec = desired.resume.as_ref().map(|task| task.spec.clone());
+        desired.decoding_start = end;
+        let has_more = desired.resume.is_some();
+        shared.decoder_done.store(!has_more, Ordering::Relaxed);
+        shared
+            .ended
+            .store(!has_more && queue.is_empty(), Ordering::Relaxed);
+    }
+    drop(queue);
+    drop(boundaries);
+    drop(desired);
+    shared.wake.notify_all();
 }
 
 fn decode_loop(shared: Arc<Shared>) {
     let mut last_generation = u64::MAX;
+    let mut last_revision = u64::MAX;
 
     loop {
         if shared.shutdown.load(Ordering::Relaxed) {
             break;
         }
 
-        let (generation, current) = match shared.desired.lock() {
-            Ok(desired) => (desired.generation, desired.current.clone()),
+        let (token, task) = match shared.desired.lock() {
+            Ok(mut desired) => {
+                let token = DecodeToken {
+                    generation: desired.generation,
+                    revision: shared.revision.load(Ordering::Acquire),
+                };
+                let task = if token.generation != last_generation {
+                    desired.current.clone().map(|spec| DecodeTask {
+                        spec,
+                        start_frame: 0,
+                    })
+                } else if token.revision != last_revision {
+                    desired.resume.take()
+                } else {
+                    None
+                };
+                (token, task)
+            }
             Err(_) => break,
         };
 
-        if let Some(current) = current
-            && generation != last_generation
-        {
-            last_generation = generation;
-            decode_playlist(&shared, generation, current);
+        last_generation = token.generation;
+        last_revision = token.revision;
+        if let Some(task) = task {
+            decode_playlist(&shared, token, task);
         }
 
         if let Ok(desired) = shared.desired.lock() {
@@ -394,40 +539,56 @@ fn decode_loop(shared: Arc<Shared>) {
     }
 }
 
-fn decode_playlist(shared: &Arc<Shared>, generation: u64, first: StreamSpec) {
-    let mut next_spec = Some(first);
-    let mut produced = 0u64;
+fn decode_playlist(shared: &Arc<Shared>, token: DecodeToken, task: DecodeTask) {
+    let mut next_spec = Some(task.spec);
+    let mut produced = task.start_frame;
 
     while let Some(spec) = next_spec {
-        if !is_current(shared, generation) {
+        if !is_current(shared, token) {
             return;
         }
-        match decode_track(shared, generation, &spec, produced) {
+        {
+            let mut desired = shared.desired.lock().expect("desired lock");
+            if !is_current(shared, token) {
+                return;
+            }
+            desired.decoding_start = produced;
+            desired.decoding_spec = Some(spec.clone());
+        }
+        match decode_track(shared, token, &spec, produced) {
             Some(frames) => produced += frames,
             None => return,
         }
 
         next_spec = match shared.desired.lock() {
-            Ok(mut desired) if desired.generation == generation => desired.next.take(),
+            Ok(mut desired) if is_current(shared, token) => {
+                desired.decoding_start = produced;
+                let next = desired.upcoming.pop_front();
+                desired.decoding_spec = next.clone();
+                next
+            }
             _ => None,
         };
     }
 
-    shared.decoder_done.store(true, Ordering::Relaxed);
+    let _desired = shared.desired.lock().expect("desired lock");
+    if is_current(shared, token) {
+        shared.decoder_done.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Returns the number of device frames pushed, or `None` when playback was
 /// superseded or failed.
 fn decode_track(
     shared: &Arc<Shared>,
-    generation: u64,
+    token: DecodeToken,
     spec: &StreamSpec,
     start_frame: u64,
 ) -> Option<u64> {
-    let source = match open_spec(spec) {
+    let source = match open_spec(spec, shared, token) {
         Ok(source) => source,
         Err(error) => {
-            shared.set_error(error);
+            set_decode_error(shared, token, error);
             return None;
         }
     };
@@ -435,17 +596,31 @@ fn decode_track(
     let mut decoder = match Decoder::open(source, spec.hint.as_deref()) {
         Ok(decoder) => decoder,
         Err(error) => {
-            shared.set_error(error);
+            set_decode_error(shared, token, error);
             return None;
         }
     };
 
+    if let Some(position_ms) = take_seek(shared, token)
+        && let Err(error) = decoder.seek_ms(position_ms)
+    {
+        set_decode_error(shared, token, error);
+        return None;
+    }
+    if !is_current(shared, token) {
+        return None;
+    }
+    let base_ms = shared.position_ms.load(Ordering::Relaxed);
     let duration_ms = spec.duration_ms.or(decoder.duration_ms()).unwrap_or(0);
 
     if let Ok(mut boundaries) = shared.boundaries.lock() {
+        if !is_current(shared, token) {
+            return None;
+        }
         boundaries.push_back(Boundary {
+            spec: spec.clone(),
             start_frame,
-            base_ms: 0,
+            base_ms: if start_frame == 0 { base_ms } else { 0 },
             duration_ms,
         });
     }
@@ -462,36 +637,14 @@ fn decode_track(
     let mut pushed_frames = 0u64;
 
     loop {
-        if !is_current(shared, generation) {
+        if !is_current(shared, token) {
             return None;
-        }
-
-        if let Some(position_ms) = take_seek(shared, generation) {
-            if let Err(error) = decoder.seek_ms(position_ms) {
-                shared.set_error(error);
-                return None;
-            }
-            if let Ok(mut queue) = shared.queue.lock() {
-                queue.clear();
-            }
-            shared.consumed_frames.store(0, Ordering::Relaxed);
-            if let Ok(mut boundaries) = shared.boundaries.lock() {
-                boundaries.clear();
-                boundaries.push_back(Boundary {
-                    start_frame: 0,
-                    base_ms: position_ms,
-                    duration_ms,
-                });
-            }
-            resampler = LinearResampler::default();
-            pushed_frames = 0;
-            continue;
         }
 
         let has_more = match decoder.next_chunk(&mut chunk) {
             Ok(has_more) => has_more,
             Err(error) => {
-                shared.set_error(error);
+                set_decode_error(shared, token, error);
                 return None;
             }
         };
@@ -509,7 +662,7 @@ fn decode_track(
             &mut output,
         );
 
-        if !push_samples(shared, generation, &output) {
+        if !push_samples(shared, token, &output) {
             return None;
         }
 
@@ -519,34 +672,36 @@ fn decode_track(
     Some(pushed_frames)
 }
 
-fn open_spec(spec: &StreamSpec) -> Result<Box<dyn symphonia::core::io::MediaSource>, PlayerError> {
+fn open_spec(
+    spec: &StreamSpec,
+    shared: &Arc<Shared>,
+    token: DecodeToken,
+) -> Result<Box<dyn symphonia::core::io::MediaSource>, PlayerError> {
     if spec.url.starts_with("http://") || spec.url.starts_with("https://") {
-        source::open_url(&spec.url)
+        let shared = Arc::clone(shared);
+        source::open_url_cancellable(&spec.url, Arc::new(move || !is_current(&shared, token)))
     } else {
         source::open_file(std::path::Path::new(&spec.url))
     }
 }
 
-fn is_current(shared: &Shared, generation: u64) -> bool {
+fn is_current(shared: &Shared, token: DecodeToken) -> bool {
     if shared.shutdown.load(Ordering::Relaxed) {
         return false;
     }
-    shared
-        .desired
-        .lock()
-        .map(|desired| desired.generation == generation)
-        .unwrap_or(false)
+    shared.generation.load(Ordering::Acquire) == token.generation
+        && shared.revision.load(Ordering::Acquire) == token.revision
 }
 
-fn take_seek(shared: &Shared, generation: u64) -> Option<u64> {
+fn take_seek(shared: &Shared, token: DecodeToken) -> Option<u64> {
     let mut desired = shared.desired.lock().ok()?;
-    if desired.generation != generation {
+    if !is_current(shared, token) {
         return None;
     }
     desired.seek.take()
 }
 
-fn push_samples(shared: &Shared, generation: u64, samples: &[f32]) -> bool {
+fn push_samples(shared: &Shared, token: DecodeToken, samples: &[f32]) -> bool {
     if samples.is_empty() {
         return true;
     }
@@ -554,12 +709,15 @@ fn push_samples(shared: &Shared, generation: u64, samples: &[f32]) -> bool {
     let capacity = shared.rate() as usize * shared.channels() * QUEUE_SECONDS;
 
     loop {
-        if !is_current(shared, generation) {
+        if !is_current(shared, token) {
             return false;
         }
 
         match shared.queue.lock() {
             Ok(mut queue) => {
+                if !is_current(shared, token) {
+                    return false;
+                }
                 if queue.len() + samples.len() <= capacity || queue.is_empty() {
                     queue.extend(samples.iter().copied());
                     return true;
@@ -579,15 +737,26 @@ fn monitor_loop(shared: Arc<Shared>) {
     }
 }
 
+fn set_decode_error(shared: &Shared, token: DecodeToken, error: PlayerError) {
+    let _desired = shared.desired.lock().expect("desired lock");
+    if is_current(shared, token) {
+        shared.set_error(error);
+    }
+}
+
+fn advance_boundaries(shared: &Shared, boundaries: &mut VecDeque<Boundary>) {
+    let consumed = shared.consumed_frames.load(Ordering::Relaxed);
+    while boundaries.len() > 1 && boundaries[1].start_frame <= consumed {
+        boundaries.pop_front();
+        shared.track_index.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 fn update_position(shared: &Shared) {
     let rate = u64::from(shared.rate());
-    let consumed = shared.consumed_frames.load(Ordering::Relaxed);
-
     if let Ok(mut boundaries) = shared.boundaries.lock() {
-        while boundaries.len() > 1 && boundaries[1].start_frame <= consumed {
-            boundaries.pop_front();
-            shared.track_index.fetch_add(1, Ordering::Relaxed);
-        }
+        advance_boundaries(shared, &mut boundaries);
+        let consumed = shared.consumed_frames.load(Ordering::Relaxed);
 
         if let Some(current) = boundaries.front() {
             let played = consumed.saturating_sub(current.start_frame);
@@ -604,14 +773,11 @@ fn update_position(shared: &Shared) {
         }
     }
 
-    let done = shared.decoder_done.load(Ordering::Relaxed);
-    let empty = shared
-        .queue
-        .lock()
-        .map(|queue| queue.is_empty())
-        .unwrap_or(true);
-
-    if done && empty && shared.playing.load(Ordering::Relaxed) {
+    if let Ok(queue) = shared.queue.lock()
+        && queue.is_empty()
+        && shared.decoder_done.load(Ordering::Relaxed)
+        && shared.playing.load(Ordering::Relaxed)
+    {
         shared.ended.store(true, Ordering::Relaxed);
     }
 }
@@ -808,19 +974,30 @@ mod tests {
     fn gapless_output_keeps_every_sample_and_advances_track() {
         let shared = Arc::new(Shared::new(44_100, 2));
         shared.playing.store(true, Ordering::Relaxed);
-        shared.desired.lock().unwrap().next = Some(StreamSpec {
-            url: fixture("mp3"),
-            hint: Some("mp3".into()),
-            duration_ms: Some(1000),
-        });
+        shared
+            .desired
+            .lock()
+            .unwrap()
+            .upcoming
+            .push_back(StreamSpec {
+                url: fixture("mp3"),
+                hint: Some("mp3".into()),
+                duration_ms: Some(1000),
+            });
         // Both one-second tracks fit in the three-second output buffer.
         decode_playlist(
             &shared,
-            0,
-            StreamSpec {
-                url: fixture("flac"),
-                hint: Some("flac".into()),
-                duration_ms: Some(1000),
+            DecodeToken {
+                generation: 0,
+                revision: 0,
+            },
+            DecodeTask {
+                start_frame: 0,
+                spec: StreamSpec {
+                    url: fixture("flac"),
+                    hint: Some("flac".into()),
+                    duration_ms: Some(1000),
+                },
             },
         );
         let mut samples = Vec::new();
@@ -849,5 +1026,250 @@ mod tests {
             rms(&samples[boundary - 882..boundary + 882]) > 0.02,
             "silence at boundary"
         );
+    }
+
+    fn spec(extension: &str) -> StreamSpec {
+        StreamSpec {
+            url: fixture(extension),
+            hint: Some(extension.into()),
+            duration_ms: Some(1000),
+        }
+    }
+
+    // Uses the real decoder and audio callback, without opening an OS device.
+    fn prepared_engine(extensions: &[&str]) -> Engine {
+        let engine = Engine {
+            shared: Arc::new(Shared::new(44_100, 2)),
+        };
+        engine.play_queue(
+            spec(extensions[0]),
+            extensions[1..].iter().map(|ext| spec(ext)).collect(),
+        );
+        decode_selected(&engine);
+        engine
+    }
+
+    fn decode_selected(engine: &Engine) {
+        let desired = engine.shared.desired.lock().unwrap();
+        let token = DecodeToken {
+            generation: desired.generation,
+            revision: engine.shared.revision.load(Ordering::Acquire),
+        };
+        let task = DecodeTask {
+            spec: desired.current.clone().unwrap(),
+            start_frame: 0,
+        };
+        drop(desired);
+        decode_playlist(&engine.shared, token, task);
+    }
+
+    fn decode_pending(engine: &Engine) {
+        let mut desired = engine.shared.desired.lock().unwrap();
+        let token = DecodeToken {
+            generation: desired.generation,
+            revision: engine.shared.revision.load(Ordering::Acquire),
+        };
+        let task = desired.resume.take();
+        drop(desired);
+        if let Some(task) = task {
+            decode_playlist(&engine.shared, token, task);
+        }
+    }
+
+    fn consume(engine: &Engine, frames: usize) -> Vec<f32> {
+        let mut out = vec![0.0; frames * 2];
+        fill(&mut out, &engine.shared, 2);
+        update_position(&engine.shared);
+        out
+    }
+
+    #[test]
+    fn replacing_prefetched_queue_keeps_current_samples_and_pause_state() {
+        let engine = prepared_engine(&["flac", "wav", "mp3"]);
+        consume(&engine, 11_025);
+        engine.pause();
+        let remaining: Vec<_> = engine
+            .shared
+            .queue
+            .lock()
+            .unwrap()
+            .iter()
+            .take(33_075 * 2)
+            .copied()
+            .collect();
+        engine.replace_upcoming(vec![spec("mp3")]);
+        decode_pending(&engine);
+        assert!(!engine.snapshot().playing);
+        let queue = engine.shared.queue.lock().unwrap();
+        assert_eq!(queue.len(), (33_075 + 44_100) * 2);
+        assert_eq!(
+            queue
+                .iter()
+                .take(remaining.len())
+                .copied()
+                .collect::<Vec<_>>(),
+            remaining
+        );
+        drop(queue);
+        assert!(consume(&engine, 100).iter().all(|sample| *sample == 0.0));
+        assert_eq!(
+            engine.shared.consumed_frames.load(Ordering::Relaxed),
+            11_025
+        );
+        engine.resume();
+        consume(&engine, 33_075 + 44_100);
+        let snapshot = engine.snapshot();
+        assert!(snapshot.ended);
+        assert_eq!(snapshot.track_index, 1);
+        assert_eq!(snapshot.underruns, 0);
+    }
+
+    #[test]
+    fn clearing_prefetched_tracks_preserves_every_remaining_current_sample() {
+        let engine = prepared_engine(&["flac", "mp3"]);
+        consume(&engine, 22_050);
+        let remaining: Vec<_> = engine
+            .shared
+            .queue
+            .lock()
+            .unwrap()
+            .iter()
+            .take(22_050 * 2)
+            .copied()
+            .collect();
+        engine.replace_upcoming(vec![]);
+        let output = consume(&engine, 22_050);
+        assert!(
+            output
+                .iter()
+                .zip(&remaining)
+                .all(|(out, raw)| *out == *raw * engine.volume())
+        );
+        assert!(engine.snapshot().ended);
+        assert_eq!(engine.snapshot().track_index, 0);
+        assert_eq!(engine.snapshot().underruns, 0);
+    }
+
+    #[test]
+    fn appending_after_decoder_and_output_finish_starts_new_audio() {
+        let engine = prepared_engine(&["flac"]);
+        consume(&engine, 44_100);
+        assert!(engine.snapshot().ended);
+        engine.replace_upcoming(vec![spec("wav")]);
+        assert!(!engine.snapshot().ended);
+        decode_pending(&engine);
+        let output = consume(&engine, 44_100);
+        assert!(output.iter().any(|value| value.abs() > 0.05));
+        assert!(engine.snapshot().ended);
+        assert_eq!(engine.snapshot().track_index, 1);
+    }
+
+    #[test]
+    fn edits_during_future_open_cancel_stale_errors_and_keep_latest_order() {
+        let engine = prepared_engine(&["flac"]);
+        let stale = DecodeToken {
+            generation: engine.shared.generation.load(Ordering::Acquire),
+            revision: engine.shared.revision.load(Ordering::Acquire),
+        };
+        {
+            let mut desired = engine.shared.desired.lock().unwrap();
+            desired.decoding_start = 44_100;
+            desired.decoding_spec = Some(spec("missing"));
+        }
+        engine.shared.decoder_done.store(false, Ordering::Relaxed);
+        engine.replace_upcoming(vec![spec("mp3")]);
+        engine.replace_upcoming(vec![spec("wav")]);
+        assert!(decode_track(&engine.shared, stale, &spec("missing"), 44_100).is_none());
+        assert!(engine.take_error().is_none());
+        assert!(engine.is_playing());
+        decode_pending(&engine);
+        let boundaries = engine.shared.boundaries.lock().unwrap();
+        assert_eq!(boundaries.len(), 2);
+        assert_eq!(boundaries[1].spec.hint.as_deref(), Some("wav"));
+    }
+
+    #[test]
+    fn seek_before_revised_prefetch_starts_keeps_the_new_song() {
+        let engine = prepared_engine(&["flac", "mp3"]);
+        engine.replace_upcoming(vec![spec("wav")]);
+        engine.seek(500);
+        decode_selected(&engine);
+        let boundaries = engine.shared.boundaries.lock().unwrap();
+        assert_eq!(boundaries.len(), 2);
+        assert_eq!(boundaries[1].spec.hint.as_deref(), Some("wav"));
+    }
+
+    #[test]
+    fn seeking_during_initial_open_does_not_append_current_song_twice() {
+        let engine = Engine {
+            shared: Arc::new(Shared::new(44_100, 2)),
+        };
+        engine.play_queue(spec("flac"), vec![spec("wav")]);
+        engine.shared.desired.lock().unwrap().decoding_spec = Some(spec("flac"));
+        engine.seek(500);
+        decode_selected(&engine);
+        let boundaries = engine.shared.boundaries.lock().unwrap();
+        assert_eq!(boundaries.len(), 2);
+        assert_eq!(boundaries[0].spec.hint.as_deref(), Some("flac"));
+        assert_eq!(boundaries[1].spec.hint.as_deref(), Some("wav"));
+    }
+
+    #[test]
+    fn seek_targets_audible_track_after_transition_and_keeps_upcoming() {
+        let engine = prepared_engine(&["flac", "mp3", "wav"]);
+        consume(&engine, 55_125);
+        assert_eq!(engine.snapshot().track_index, 1);
+        engine.pause();
+        engine.seek(500);
+        decode_selected(&engine);
+        assert!(engine.take_error().is_none());
+        assert!(!engine.snapshot().playing);
+        assert_eq!(engine.snapshot().position_ms, 500);
+        let boundaries = engine.shared.boundaries.lock().unwrap();
+        assert_eq!(boundaries.len(), 2);
+        assert_eq!(boundaries[0].spec.hint.as_deref(), Some("mp3"));
+        assert_eq!(boundaries[1].spec.hint.as_deref(), Some("wav"));
+        drop(boundaries);
+        engine.replace_upcoming(vec![]);
+        engine.resume();
+        let frames = engine.shared.queue.lock().unwrap().len() / 2;
+        assert!(frames > 0 && frames < 44_100);
+        consume(&engine, frames);
+        assert_eq!(engine.snapshot().track_index, 1);
+        assert!(engine.snapshot().ended);
+    }
+
+    #[test]
+    fn worker_plays_four_tracks_across_bounded_buffer_without_losing_samples() {
+        let engine = Engine {
+            shared: Arc::new(Shared::new(44_100, 2)),
+        };
+        engine.play_queue(spec("flac"), vec![spec("mp3"), spec("wav"), spec("flac")]);
+        let shared = Arc::clone(&engine.shared);
+        let worker = thread::spawn(move || decode_loop(shared));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let available = engine.shared.queue.lock().unwrap().len() / 2;
+            if available > 0 {
+                consume(&engine, available.min(2048));
+            }
+            if engine.snapshot().ended {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "decoder stalled");
+            if available == 0 {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        assert!(engine.take_error().is_none());
+        // try_lock contention can emit silence, but must never consume or lose
+        // PCM. Count the actual device frames, excluding those silent calls.
+        assert_eq!(
+            engine.shared.consumed_frames.load(Ordering::Relaxed),
+            44_100 * 4
+        );
+        assert_eq!(engine.snapshot().track_index, 3);
+        drop(engine);
+        worker.join().unwrap();
     }
 }

@@ -12,7 +12,8 @@ use melos_api::{
     Album, AlbumWithSongs, Artist, ArtistWithAlbums, Client, Credentials, SearchResult, ServerInfo,
     Song, StreamQuality,
 };
-use melos_core::Settings;
+use melos_core::artwork::playback_cover_candidates;
+use melos_core::{Queue, Settings};
 use melos_player::{Engine, StreamSpec};
 
 use crate::api::{ApiWorker, Request, Response};
@@ -21,7 +22,7 @@ use crate::theme;
 use crate::ui::{self, input::TextInput};
 
 const SIDEBAR_WIDTH: f32 = 216.0;
-const QUEUE_WIDTH: f32 = 288.0;
+const QUEUE_WIDTH: f32 = 340.0;
 const CONTENT_PADDING: f32 = 64.0;
 const CARD_MIN: f32 = 160.0;
 const CARD_GAP: f32 = 24.0;
@@ -37,6 +38,29 @@ struct SliderDrag {
     kind: SliderKind,
     bounds: Bounds<Pixels>,
     fraction: f32,
+}
+
+#[derive(Clone)]
+struct QueueDrag {
+    index: usize,
+    title: String,
+    position: Point<Pixels>,
+}
+
+impl Render for QueueDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().pl(self.position.x).pt(self.position.y).child(
+            div()
+                .w(px(240.))
+                .p_3()
+                .rounded_md()
+                .bg(rgb(theme::HOVER))
+                .text_color(rgb(theme::TEXT))
+                .text_sm()
+                .shadow_md()
+                .child(self.title.clone()),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,14 +123,15 @@ pub struct Root {
     search_result: Option<SearchResult>,
     covers: HashMap<String, Arc<Image>>,
     cover_requests: HashSet<String>,
+    priority_cover_requests: HashSet<String>,
+    playing_cover_ids: Vec<String>,
     settings: Entity<Settings>,
     smtc: Option<smtc::Smtc>,
     smoke_reported: bool,
 
     client: Option<Client>,
     engine: Option<Engine>,
-    queue: Vec<Song>,
-    queue_index: usize,
+    queue: Queue,
     now_playing: Option<Song>,
     position_ms: u64,
     duration_ms: u64,
@@ -166,13 +191,14 @@ impl Root {
             search_result: None,
             covers: HashMap::new(),
             cover_requests: HashSet::new(),
+            priority_cover_requests: HashSet::new(),
+            playing_cover_ids: Vec::new(),
             settings: saved_settings,
             smtc: None,
             smoke_reported: false,
             client: None,
             engine: Engine::new().ok(),
-            queue: Vec::new(),
-            queue_index: 0,
+            queue: Queue::new(),
             now_playing: None,
             position_ms: 0,
             duration_ms: 0,
@@ -284,6 +310,8 @@ impl Root {
                 self.search_result = Some(*result);
             }
             Response::Cover { id, bytes } => {
+                self.cover_requests.remove(&id);
+                self.priority_cover_requests.remove(&id);
                 if let Some(format) = guess_image_format(&bytes) {
                     self.covers
                         .insert(id, Arc::new(Image::from_bytes(format, bytes)));
@@ -291,6 +319,7 @@ impl Root {
             }
             Response::CoverFailed { id } => {
                 self.cover_requests.remove(&id);
+                self.priority_cover_requests.remove(&id);
             }
             Response::Scrobbled => {}
             Response::Starred { id, error } => {
@@ -322,6 +351,23 @@ impl Root {
                 size: 240,
             });
         }
+    }
+
+    fn set_now_playing(&mut self, song: Song) {
+        self.playing_cover_ids = playback_cover_candidates(
+            &song,
+            &self.albums,
+            self.detail.as_ref().map(|detail| &detail.album),
+        );
+        for id in &self.playing_cover_ids {
+            if !self.covers.contains_key(id) && self.priority_cover_requests.insert(id.clone()) {
+                self.api.send_priority(Request::Cover {
+                    id: id.clone(),
+                    size: 240,
+                });
+            }
+        }
+        self.now_playing = Some(song);
     }
 
     /// Persists the current connection fields for the next launch.
@@ -426,6 +472,8 @@ impl Root {
                             this.artists.clear();
                             this.covers.clear();
                             this.cover_requests.clear();
+                            this.priority_cover_requests.clear();
+                            this.playing_cover_ids.clear();
                             this.pending_stars.clear();
                             this.detail = None;
                             this.artist_view = None;
@@ -511,8 +559,7 @@ impl Root {
         if songs.is_empty() {
             return;
         }
-        self.queue = songs;
-        self.queue_index = start.min(self.queue.len() - 1);
+        self.queue.play_album(songs, start);
         self.start_current(cx);
     }
 
@@ -520,16 +567,18 @@ impl Root {
         let Some(client) = self.client.as_ref() else {
             return;
         };
-        let Some(song) = self.queue.get(self.queue_index).cloned() else {
+        let Some(song) = self.queue.current().cloned() else {
             return;
         };
 
         let quality = self.stream_quality(cx);
         let spec = stream_spec(client, &song, quality);
-        let next = self
+        let upcoming = self
             .queue
-            .get(self.queue_index + 1)
-            .map(|song| stream_spec(client, song, quality));
+            .upcoming()
+            .iter()
+            .map(|song| stream_spec(client, song, quality))
+            .collect();
         let duration = spec.duration_ms.unwrap_or(0);
 
         let Some(engine) = self.engine.as_ref() else {
@@ -538,9 +587,9 @@ impl Root {
             return;
         };
 
-        engine.play(spec, next);
+        engine.play_queue(spec, upcoming);
 
-        self.now_playing = Some(song);
+        self.set_now_playing(song);
         self.position_ms = 0;
         self.duration_ms = duration;
         self.last_track_index = 0;
@@ -555,6 +604,15 @@ impl Root {
             if !self.queue.is_empty() {
                 self.start_current(cx);
             }
+            return;
+        }
+
+        if self
+            .engine
+            .as_ref()
+            .is_some_and(|engine| engine.snapshot().ended)
+        {
+            self.start_current(cx);
             return;
         }
 
@@ -573,17 +631,116 @@ impl Root {
     }
 
     fn play_next(&mut self, cx: &mut Context<Self>) {
-        if self.queue_index + 1 < self.queue.len() {
-            self.queue_index += 1;
+        self.sync_engine(cx);
+        if self.queue.next_track().is_some() {
             self.start_current(cx);
         }
     }
 
     fn play_previous(&mut self, cx: &mut Context<Self>) {
-        if self.queue_index > 0 {
-            self.queue_index -= 1;
+        self.sync_engine(cx);
+        if self.queue.previous().is_some() {
             self.start_current(cx);
         }
+    }
+
+    fn refresh_upcoming(&mut self, cx: &Context<Self>) {
+        if let (Some(client), Some(engine)) = (&self.client, &self.engine) {
+            let quality = self.stream_quality(cx);
+            engine.replace_upcoming(
+                self.queue
+                    .upcoming()
+                    .iter()
+                    .map(|song| stream_spec(client, song, quality))
+                    .collect(),
+            );
+        }
+    }
+
+    fn enqueue(&mut self, songs: Vec<Song>, next: bool, cx: &mut Context<Self>) {
+        if songs.is_empty() {
+            return;
+        }
+        self.sync_engine(cx);
+        let ended = self
+            .engine
+            .as_ref()
+            .is_some_and(|engine| engine.snapshot().ended);
+        let start = self.now_playing.is_none() || ended;
+        if next && self.queue.current().is_some() {
+            for song in songs.into_iter().rev() {
+                self.queue.insert_next(song);
+            }
+        } else {
+            self.queue.append(songs);
+        }
+        if ended {
+            self.queue.next_track();
+        }
+        if start {
+            self.start_current(cx);
+        } else {
+            self.refresh_upcoming(cx);
+        }
+        cx.notify();
+    }
+
+    fn select_queue_song(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.sync_engine(cx);
+        if self.queue.select(index) {
+            self.start_current(cx);
+        }
+    }
+
+    fn remove_queue_song(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.sync_engine(cx);
+        let removing_current = self.queue.current_index() == Some(index);
+        let paused = !self.playing;
+        if self.queue.remove(index).is_none() {
+            return;
+        }
+        if removing_current {
+            if self.queue.current().is_some() {
+                self.start_current(cx);
+                if paused {
+                    if let Some(engine) = &self.engine {
+                        engine.pause();
+                    }
+                    self.playing = false;
+                }
+            } else {
+                if let Some(engine) = &self.engine {
+                    engine.stop();
+                }
+                self.now_playing = None;
+                self.playing_cover_ids.clear();
+                self.position_ms = 0;
+                self.duration_ms = 0;
+                self.last_track_index = 0;
+                self.playing = false;
+                if let Some(smtc) = &self.smtc {
+                    smtc.set_status(None);
+                }
+            }
+        } else {
+            self.refresh_upcoming(cx);
+        }
+        cx.notify();
+    }
+
+    fn move_queue_song(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        self.sync_engine(cx);
+        if self.queue.move_song(from, to) {
+            self.refresh_upcoming(cx);
+            cx.notify();
+        }
+    }
+
+    fn clear_upcoming(&mut self, cx: &mut Context<Self>) {
+        self.sync_engine(cx);
+        self.queue.clear_upcoming();
+        self.refresh_upcoming(cx);
+        cx.notify();
     }
 
     fn toggle_star(&mut self, cx: &mut Context<Self>) {
@@ -651,6 +808,7 @@ impl Root {
     }
 
     fn seek_fraction(&mut self, fraction: f32, cx: &mut Context<Self>) {
+        self.sync_engine(cx);
         if self.duration_ms == 0 {
             return;
         }
@@ -794,7 +952,7 @@ impl Root {
 
     /// Pulls the engine snapshot into the UI state. Returns true when a redraw
     /// is warranted.
-    fn sync_engine(&mut self, cx: &Context<Self>) -> bool {
+    fn sync_engine(&mut self, _cx: &Context<Self>) -> bool {
         let Some(engine) = self.engine.as_ref() else {
             return false;
         };
@@ -821,8 +979,12 @@ impl Root {
         if snapshot.track_index > self.last_track_index {
             let advance = (snapshot.track_index - self.last_track_index) as usize;
             self.last_track_index = snapshot.track_index;
-            self.queue_index = (self.queue_index + advance).min(self.queue.len().saturating_sub(1));
-            self.now_playing = self.queue.get(self.queue_index).cloned();
+            for _ in 0..advance {
+                self.queue.next_track();
+            }
+            if let Some(song) = self.queue.current().cloned() {
+                self.set_now_playing(song);
+            }
             self.position_ms = 0;
             self.duration_ms = self
                 .now_playing
@@ -833,11 +995,6 @@ impl Root {
             self.scrobbled_playing = false;
             self.scrobbled_submitted = false;
 
-            if let (Some(client), Some(engine)) = (self.client.as_ref(), self.engine.as_ref())
-                && let Some(next) = self.queue.get(self.queue_index + 1)
-            {
-                engine.set_next(stream_spec(client, next, self.stream_quality(cx)));
-            }
             changed = true;
         }
 
@@ -1234,6 +1391,16 @@ impl Root {
                                     .items_center()
                                     .gap_3()
                                     .child(div().w(px(120.)).child(play_all))
+                                    .child(ui::ghost_button(
+                                        "album-enqueue",
+                                        "加入队列",
+                                        false,
+                                        cx.listener(
+                                            move |this: &mut Root, _: &ClickEvent, _, cx| {
+                                                this.enqueue((*songs_arc).clone(), false, cx);
+                                            },
+                                        ),
+                                    ))
                                     .child(self.star_button(cx)),
                             ),
                     ),
@@ -1389,9 +1556,11 @@ impl Root {
             .and_then(|song| song.artist.clone())
             .unwrap_or_else(|| "选择一首歌开始".into());
         let cover_id = self
-            .now_playing
-            .as_ref()
-            .and_then(|song| song.cover_art.as_deref());
+            .playing_cover_ids
+            .iter()
+            .find(|id| self.covers.contains_key(*id))
+            .or_else(|| self.playing_cover_ids.first())
+            .map(String::as_str);
         let fraction = if self.duration_ms > 0 {
             self.position_ms as f32 / self.duration_ms as f32
         } else {
@@ -1408,7 +1577,13 @@ impl Root {
             .bg(rgba(0x0C0C10E6))
             .border_t_1()
             .border_color(rgb(theme::BORDER))
-            .child(div().size(px(48.)).child(self.cover(cover_id, 0)))
+            .child(
+                div()
+                    .size(px(48.))
+                    .flex_shrink_0()
+                    .overflow_hidden()
+                    .child(self.cover(cover_id, 0)),
+            )
             .child(
                 div()
                     .flex()
@@ -1486,47 +1661,145 @@ impl Root {
     }
 
     fn queue_drawer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut list = div().flex().flex_col().gap_1();
-
+        let mut list = div()
+            .id("queue-scroll")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll();
         if self.queue.is_empty() {
             list = list.child(placeholder("队列为空"));
-        } else {
-            for (index, song) in self.queue.iter().enumerate() {
-                let songs = self.queue.clone();
-                list = list.child(
-                    div()
-                        .id(format!("queue-{}", index))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .px_2()
-                        .py_2()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgba(0xFFFFFF0A)))
-                        .child(div().text_xs().child(song.title.clone()))
-                        .child(ui::muted_label(format_duration(song.duration)))
-                        .on_click(cx.listener(
-                            move |this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
-                                this.play_songs(songs.clone(), index, cx);
-                            },
-                        )),
-                );
-            }
         }
-
+        for (index, song) in self.queue.songs().iter().enumerate() {
+            let current = self.queue.current_index() == Some(index);
+            let drag = QueueDrag {
+                index,
+                title: song.title.clone(),
+                position: Point::default(),
+            };
+            list = list.child(
+                div()
+                    .id(format!("queue-{index}"))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .px_2()
+                    .py_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(current, |row| row.bg(rgba(0xFFFFFF14)))
+                    .hover(|style| style.bg(rgba(0xFFFFFF0A)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(ui::muted_label(if current {
+                                "▶".to_owned()
+                            } else {
+                                format!("{}", index + 1)
+                            }))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_xs()
+                                    .truncate()
+                                    .child(song.title.clone()),
+                            )
+                            .child(ui::muted_label(format_duration(song.duration))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(ui::muted_label(if current {
+                                "正在播放"
+                            } else {
+                                "拖动排序"
+                            }))
+                            .child(div().flex_1())
+                            .when(index > 0, |row| {
+                                row.child(ui::ghost_button(
+                                    format!("queue-up-{index}"),
+                                    "↑",
+                                    false,
+                                    cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.move_queue_song(index, index - 1, cx);
+                                    }),
+                                ))
+                            })
+                            .when(index + 1 < self.queue.len(), |row| {
+                                row.child(ui::ghost_button(
+                                    format!("queue-down-{index}"),
+                                    "↓",
+                                    false,
+                                    cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.move_queue_song(index, index + 1, cx);
+                                    }),
+                                ))
+                            })
+                            .child(ui::ghost_button(
+                                format!("queue-remove-{index}"),
+                                "移除",
+                                false,
+                                cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.remove_queue_song(index, cx);
+                                }),
+                            )),
+                    )
+                    .on_click(cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                        this.select_queue_song(index, cx);
+                    }))
+                    .on_drag(drag, |info: &QueueDrag, position, _, cx| {
+                        let mut preview = info.clone();
+                        preview.position = position;
+                        cx.new(|_| preview)
+                    })
+                    .on_drop(
+                        cx.listener(move |this: &mut Root, info: &QueueDrag, _, cx| {
+                            this.move_queue_song(info.index, index, cx);
+                        }),
+                    ),
+            );
+        }
         div()
             .flex()
             .flex_col()
             .gap_3()
             .w(px(QUEUE_WIDTH))
             .h_full()
+            .min_h_0()
             .flex_shrink_0()
             .p_4()
             .bg(rgba(0x0E0E12E6))
             .border_l_1()
             .border_color(rgb(theme::BORDER))
-            .child(div().text_sm().child("播放队列"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(format!("播放队列 · {} 首", self.queue.len())),
+                    )
+                    .child(ui::ghost_button(
+                        "queue-clear-upcoming",
+                        "清空待播",
+                        false,
+                        cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                            this.clear_upcoming(cx);
+                        }),
+                    )),
+            )
             .child(list)
     }
 }
@@ -1678,11 +1951,13 @@ fn song_row(
     songs: Arc<Vec<Song>>,
     cx: &mut Context<Root>,
 ) -> impl IntoElement {
+    let next_song = song.clone();
+    let append_song = song.clone();
     div()
         .id(format!("song-{}-{}", song.id, index))
         .flex()
-        .items_center()
-        .gap_3()
+        .flex_col()
+        .gap_1()
         .px_3()
         .py_2()
         .rounded_md()
@@ -1690,14 +1965,59 @@ fn song_row(
         .hover(|style| style.bg(rgba(0xFFFFFF0A)))
         .child(
             div()
-                .w(px(28.))
-                .text_xs()
-                .text_color(rgb(theme::TEXT_FAINT))
-                .child(format!("{}", song.track.unwrap_or(index as u32 + 1))),
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(
+                    div()
+                        .w(px(28.))
+                        .text_xs()
+                        .text_color(rgb(theme::TEXT_FAINT))
+                        .child(format!("{}", song.track.unwrap_or(index as u32 + 1))),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .truncate()
+                        .child(song.title.clone()),
+                )
+                .child(
+                    div()
+                        .max_w(px(130.))
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(rgb(theme::TEXT_MUTED))
+                        .truncate()
+                        .child(song.artist.clone().unwrap_or_default()),
+                )
+                .child(ui::muted_label(format_duration(song.duration))),
         )
-        .child(div().flex_1().text_sm().child(song.title.clone()))
-        .child(ui::muted_label(song.artist.clone().unwrap_or_default()))
-        .child(ui::muted_label(format_duration(song.duration)))
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_1()
+                .child(ui::ghost_button(
+                    format!("song-next-{index}"),
+                    "下一首播放",
+                    false,
+                    cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.enqueue(vec![next_song.clone()], true, cx);
+                    }),
+                ))
+                .child(ui::ghost_button(
+                    format!("song-append-{index}"),
+                    "加入队列",
+                    false,
+                    cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.enqueue(vec![append_song.clone()], false, cx);
+                    }),
+                )),
+        )
         .on_click(
             cx.listener(move |this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
                 this.play_songs((*songs).clone(), index, cx);

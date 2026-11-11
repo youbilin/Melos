@@ -1,7 +1,7 @@
 //! Media sources: a local file, or an HTTP stream with Range seeking.
 
 use std::io::{self, Read, Seek, SeekFrom};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::{Client, Response};
@@ -16,6 +16,26 @@ pub fn open_file(path: &std::path::Path) -> Result<Box<dyn MediaSource>, PlayerE
 
 pub fn open_url(url: &str) -> Result<Box<dyn MediaSource>, PlayerError> {
     Ok(Box::new(HttpSource::open(url)?))
+}
+
+pub(crate) fn open_url_cancellable(
+    url: &str,
+    cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> Result<Box<dyn MediaSource>, PlayerError> {
+    let mut source = HttpSource::open(url)?;
+    source.cancelled = Some(cancelled);
+    Ok(Box::new(source))
+}
+
+fn check_cancelled(cancelled: &Option<Arc<dyn Fn() -> bool + Send + Sync>>) -> io::Result<()> {
+    if cancelled.as_ref().is_some_and(|cancelled| cancelled()) {
+        Err(io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "playback superseded",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 struct HttpInner {
@@ -34,6 +54,7 @@ struct HttpInner {
 pub struct HttpSource {
     url: String,
     inner: Mutex<HttpInner>,
+    cancelled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl HttpSource {
@@ -55,6 +76,7 @@ impl HttpSource {
 
         Ok(Self {
             url: url.to_owned(),
+            cancelled: None,
             inner: Mutex::new(HttpInner {
                 client,
                 response: Some(response),
@@ -71,12 +93,14 @@ impl Read for HttpSource {
         if buf.is_empty() {
             return Ok(0);
         }
+        check_cancelled(&self.cancelled)?;
         let inner = self.inner.get_mut().expect("http source lock");
         if inner.len.is_some_and(|len| inner.position >= len) {
             return Ok(0);
         }
         let deadline = Instant::now() + Duration::from_secs(45);
         loop {
+            check_cancelled(&self.cancelled)?;
             let read = match inner.response.as_mut() {
                 Some(response) => response.read(buf),
                 None => Err(io::Error::new(
@@ -101,6 +125,7 @@ impl Read for HttpSource {
             }
             inner.response = None;
             loop {
+                check_cancelled(&self.cancelled)?;
                 match reopen(&self.url, inner, inner.position) {
                     Ok(()) => break,
                     Err(error)
@@ -120,6 +145,7 @@ impl Read for HttpSource {
 
 impl Seek for HttpSource {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        check_cancelled(&self.cancelled)?;
         let inner = self.inner.get_mut().expect("http source lock");
 
         let target = match pos {
@@ -322,6 +348,37 @@ mod tests {
     #[test]
     fn interrupted_stream_resumes_without_losing_or_repeating_bytes() {
         assert_resume(Duration::from_millis(100));
+    }
+
+    #[test]
+    fn queue_edit_cancels_http_recovery_instead_of_retrying_for_forty_five_seconds() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let server_cancelled = Arc::clone(&cancelled);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/audio", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).unwrap() > 0);
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 256\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n").unwrap();
+            socket.write_all(&[0; 64]).unwrap();
+            drop(socket);
+            let (mut socket, _) = listener.accept().unwrap();
+            assert!(socket.read(&mut request).unwrap() > 0);
+            server_cancelled.store(true, Ordering::Release);
+            socket.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let mut source =
+            open_url_cancellable(&url, Arc::new(move || cancelled.load(Ordering::Acquire)))
+                .unwrap();
+        let started = Instant::now();
+        let mut bytes = Vec::new();
+        let error = source.read_to_end(&mut bytes).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+        assert_eq!(bytes.len(), 64);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        server.join().unwrap();
     }
 
     #[test]

@@ -18,7 +18,7 @@ pub enum Icon {
 
 /// A flat text button used for nav entries and player controls.
 pub fn ghost_button(
-    id: &'static str,
+    id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     selected: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,

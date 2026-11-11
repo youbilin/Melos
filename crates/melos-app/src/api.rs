@@ -62,24 +62,31 @@ pub enum Response {
 
 pub struct ApiWorker {
     requests: Sender<Request>,
+    priority: Sender<Request>,
     responses: Receiver<Response>,
 }
 
 impl ApiWorker {
     pub fn new() -> Self {
         let (requests, request_rx) = mpsc::channel();
+        let (priority, priority_rx) = mpsc::channel();
         let (response_tx, responses) = mpsc::channel();
 
-        thread::spawn(move || run(request_rx, response_tx));
+        thread::spawn(move || run(request_rx, priority_rx, response_tx));
 
         Self {
             requests,
+            priority,
             responses,
         }
     }
 
     pub fn send(&self, request: Request) {
         let _ = self.requests.send(request);
+    }
+
+    pub fn send_priority(&self, request: Request) {
+        let _ = self.priority.send(request);
     }
 
     /// Non-blocking drain used by the UI poller.
@@ -92,7 +99,7 @@ impl ApiWorker {
     }
 }
 
-fn run(requests: Receiver<Request>, responses: Sender<Response>) {
+fn run(requests: Receiver<Request>, priority: Receiver<Request>, responses: Sender<Response>) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -106,7 +113,15 @@ fn run(requests: Receiver<Request>, responses: Sender<Response>) {
 
     let mut client: Option<Client> = None;
 
-    while let Ok(request) = requests.recv() {
+    loop {
+        let request = match priority.try_recv() {
+            Ok(request) => request,
+            Err(_) => match requests.recv_timeout(std::time::Duration::from_millis(25)) {
+                Ok(request) => request,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            },
+        };
         let response = runtime.block_on(handle(&mut client, request));
         if responses.send(response).is_err() {
             break;

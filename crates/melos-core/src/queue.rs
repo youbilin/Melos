@@ -27,6 +27,94 @@ impl Queue {
         &self.songs
     }
 
+    pub fn len(&self) -> usize {
+        self.songs.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.songs.is_empty()
+    }
+
+    pub fn upcoming(&self) -> &[Song] {
+        self.current
+            .map(|index| &self.songs[index + 1..])
+            .unwrap_or(&[])
+    }
+
+    pub fn select(&mut self, index: usize) -> bool {
+        if index >= self.songs.len() {
+            return false;
+        }
+        self.current = Some(index);
+        true
+    }
+
+    pub fn append(&mut self, songs: Vec<Song>) {
+        let first_new = self.songs.len();
+        self.songs.extend(songs);
+        if self.current.is_none() && first_new < self.songs.len() {
+            self.current = Some(first_new);
+        }
+    }
+
+    pub fn insert_next(&mut self, song: Song) {
+        let index = self
+            .current
+            .map(|index| index + 1)
+            .unwrap_or(self.songs.len());
+        self.songs.insert(index, song);
+        if self.current.is_none() {
+            self.current = Some(index);
+        }
+    }
+
+    pub fn remove(&mut self, index: usize) -> Option<Song> {
+        if index >= self.songs.len() {
+            return None;
+        }
+        let song = self.songs.remove(index);
+        self.current = match self.current {
+            Some(current) if index < current => Some(current - 1),
+            Some(current) if index == current => (index < self.songs.len()).then_some(index),
+            current => current,
+        };
+        Some(song)
+    }
+
+    /// Moves an entry to its final index, preserving the active entry even
+    /// when the queue contains repeated copies of the same song.
+    pub fn move_song(&mut self, from: usize, to: usize) -> bool {
+        if from >= self.songs.len() || to >= self.songs.len() || from == to {
+            return false;
+        }
+        let song = self.songs.remove(from);
+        self.songs.insert(to, song);
+        self.current = self.current.map(|current| {
+            if current == from {
+                to
+            } else if from < current && to >= current {
+                current - 1
+            } else if from > current && to <= current {
+                current + 1
+            } else {
+                current
+            }
+        });
+        true
+    }
+
+    pub fn clear_upcoming(&mut self) {
+        if let Some(current) = self.current {
+            self.songs.truncate(current + 1);
+        } else {
+            self.songs.clear();
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.songs.clear();
+        self.current = None;
+    }
+
     pub fn current_index(&self) -> Option<usize> {
         self.current
     }
@@ -152,5 +240,60 @@ mod tests {
     fn previous_clamps_at_start() {
         let mut q = queue(2);
         assert_eq!(q.previous().unwrap().id, "0");
+    }
+
+    #[test]
+    fn editing_upcoming_preserves_current_song() {
+        let mut q = queue(3);
+        q.select(1);
+        q.insert_next(song("next"));
+        q.append(vec![song("last")]);
+        assert_eq!(q.current().unwrap().id, "1");
+        assert_eq!(
+            q.upcoming()
+                .iter()
+                .map(|song| song.id.as_str())
+                .collect::<Vec<_>>(),
+            ["next", "2", "last"]
+        );
+        q.clear_upcoming();
+        assert_eq!(q.current().unwrap().id, "1");
+        assert!(q.upcoming().is_empty());
+    }
+
+    #[test]
+    fn deleting_before_current_or_current_keeps_correct_selection() {
+        let mut q = queue(4);
+        q.select(2);
+        q.remove(0);
+        assert_eq!(q.current_index(), Some(1));
+        assert_eq!(q.current().unwrap().id, "2");
+        q.remove(1);
+        assert_eq!(q.current().unwrap().id, "3");
+        q.remove(1);
+        assert!(q.current().is_none());
+    }
+
+    #[test]
+    fn reordering_preserves_the_active_duplicate_entry() {
+        let mut q = Queue::new();
+        q.play_album(vec![song("same"), song("same"), song("other")], 1);
+        q.move_song(0, 2);
+        assert_eq!(q.current_index(), Some(0));
+        q.move_song(0, 2);
+        assert_eq!(q.current_index(), Some(2));
+        assert_eq!(q.current().unwrap().id, "same");
+    }
+
+    #[test]
+    fn insertion_into_empty_queue_and_invalid_edits_are_safe() {
+        let mut q = Queue::new();
+        assert!(q.remove(0).is_none());
+        assert!(!q.move_song(0, 1));
+        q.insert_next(song("first"));
+        assert_eq!(q.current().unwrap().id, "first");
+        q.clear();
+        q.append(vec![song("second")]);
+        assert_eq!(q.current().unwrap().id, "second");
     }
 }
