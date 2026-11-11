@@ -2295,7 +2295,7 @@ impl Root {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(ui::ghost_button(
+                    .child(ui::compact_button(
                         "shuffle",
                         "随机",
                         self.queue.shuffle(),
@@ -2303,7 +2303,7 @@ impl Root {
                             this.toggle_shuffle(cx);
                         }),
                     ))
-                    .child(ui::ghost_button(
+                    .child(ui::compact_button(
                         "repeat",
                         match self.queue.repeat() {
                             RepeatMode::Off => "循环关",

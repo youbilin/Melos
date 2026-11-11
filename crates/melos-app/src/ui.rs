@@ -44,6 +44,31 @@ pub fn ghost_button(
         .on_click(on_click)
 }
 
+/// A small text button that fits stacked controls in the playback bar.
+pub fn compact_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    selected: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .text_xs()
+        .cursor_pointer()
+        .text_color(rgb(if selected {
+            theme::TEXT
+        } else {
+            theme::TEXT_MUTED
+        }))
+        .when(selected, |style| style.bg(rgba(0xFFFFFF14)))
+        .hover(|style| style.bg(rgba(0xFFFFFF0A)))
+        .child(label.into())
+        .on_click(on_click)
+}
+
 /// A circular transport control with a vector icon (no emoji glyphs).
 pub fn transport_button(
     id: &'static str,
