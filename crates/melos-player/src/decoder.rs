@@ -1,7 +1,7 @@
-//! Symphonia-backed decoder with encoder delay / padding trimming.
+//! Symphonia decoder using packet-aware gapless trimming.
 //!
-//! `Track::delay` and `Track::padding` matter for MP3: a decoder that ignores
-//! them inserts silence at every track boundary, which breaks gapless playback.
+//! Symphonia trims encoder delay and padding itself. Applying the track-level
+//! values again would cut valid samples from the beginning and end of MP3s.
 
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
@@ -21,10 +21,6 @@ pub struct Decoder {
     sample_rate: u32,
     channels: u16,
     duration_ms: Option<u64>,
-    delay_remaining: u64,
-    padding_samples: usize,
-    scratch: Vec<f32>,
-    tail: Vec<f32>,
     eof: bool,
 }
 
@@ -46,7 +42,7 @@ impl Decoder {
             )
             .map_err(|e| PlayerError::Open(e.to_string()))?;
 
-        let (track_id, sample_rate, channels, duration_ms, delay, padding, decoder) = {
+        let (track_id, sample_rate, channels, duration_ms, decoder) = {
             let track = format
                 .default_track(TrackType::Audio)
                 .ok_or_else(|| PlayerError::Open("no audio track".into()))?;
@@ -75,15 +71,7 @@ impl Decoder {
                 .make_audio_decoder(params, &AudioDecoderOptions::default())
                 .map_err(|e| PlayerError::Decode(format!("unsupported codec: {e}")))?;
 
-            (
-                track.id,
-                sample_rate,
-                channels,
-                duration_ms,
-                u64::from(track.delay.unwrap_or(0)),
-                u64::from(track.padding.unwrap_or(0)),
-                decoder,
-            )
+            (track.id, sample_rate, channels, duration_ms, decoder)
         };
 
         Ok(Self {
@@ -93,10 +81,6 @@ impl Decoder {
             sample_rate,
             channels: channels.max(1),
             duration_ms,
-            delay_remaining: delay,
-            padding_samples: padding as usize * channels.max(1) as usize,
-            scratch: Vec::new(),
-            tail: Vec::new(),
             eof: false,
         })
     }
@@ -115,18 +99,14 @@ impl Decoder {
 
     /// Decodes the next chunk of interleaved f32 samples.
     ///
-    /// Returns `false` at end of stream. The encoder delay is dropped from the
-    /// front and the padding is held back from the tail, so concatenating two
-    /// tracks is sample-exact.
+    /// Returns `false` at end of stream. Decoder options retain Symphonia's
+    /// default gapless behavior; this layer never applies a second trim.
     pub fn next_chunk(&mut self, out: &mut Vec<f32>) -> Result<bool, PlayerError> {
         out.clear();
 
         loop {
             if self.eof {
-                let drain = self.tail.len().saturating_sub(self.padding_samples);
-                out.extend(self.tail.drain(..drain));
-                self.tail.clear();
-                return Ok(!out.is_empty());
+                return Ok(false);
             }
 
             match self.format.next_packet() {
@@ -137,24 +117,8 @@ impl Decoder {
 
                     match self.decoder.decode(&packet) {
                         Ok(buffer) => {
-                            self.scratch.resize(buffer.samples_interleaved(), 0.0);
-                            buffer.copy_to_slice_interleaved(&mut self.scratch);
-
-                            let channels = self.channels as usize;
-                            let frames = self.scratch.len() / channels;
-                            let mut start = 0usize;
-
-                            if self.delay_remaining > 0 {
-                                let skip = self.delay_remaining.min(frames as u64) as usize;
-                                start = skip * channels;
-                                self.delay_remaining -= skip as u64;
-                            }
-
-                            self.tail.extend_from_slice(&self.scratch[start..]);
-
-                            let drain = self.tail.len().saturating_sub(self.padding_samples);
-                            out.extend(self.tail.drain(..drain));
-
+                            out.resize(buffer.samples_interleaved(), 0.0);
+                            buffer.copy_to_slice_interleaved(out.as_mut_slice());
                             if !out.is_empty() {
                                 return Ok(true);
                             }
@@ -188,9 +152,6 @@ impl Decoder {
             .map_err(|e| PlayerError::Decode(format!("seek: {e}")))?;
 
         self.decoder.reset();
-        self.tail.clear();
-        self.scratch.clear();
-        self.delay_remaining = 0;
         self.eof = false;
         Ok(())
     }

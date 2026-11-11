@@ -9,6 +9,7 @@
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
 - 格式素材：生成的 440 Hz 信号，WAV、FLAC、MP3、AAC/M4A、Vorbis/OGG。
 - Gapless：FLAC → MP3 的输出缓冲样本、曲目边界与接缝能量检查通过；不等同于全部真实音频设备场景。
+- WAV/FLAC/MP3 一秒素材均解码为准确的 44,100 帧；修复 Symphonia 已裁剪后再次裁剪的问题。
 - HTTP：本地服务端验证 Range seek、截断后重试续传，不丢失或重复字节。
 - 30 秒断流恢复长测试：显式执行通过，实际用时 30.06 秒。
 - 收藏：验证专辑使用 `albumId`，服务端拒绝时保留错误与请求标识供 UI 回滚。
@@ -21,6 +22,7 @@
 - 原生窗口 SMTC 绑定：通过。
 - 中文曲目/艺人元数据与时间线发布：通过。
 - 默认音频设备创建：通过。
+- 实际 WASAPI 播放一秒 FLAC → 一秒 MP3：两曲均播放完整，最终位置 1,000 ms，underrun 为 0（短时素材检查）。
 
 ## 发布前待验收
 

@@ -33,7 +33,11 @@ fn main() {
         .unwrap_or(12);
 
     let engine = Engine::new().expect("audio device");
-    engine.set_volume(0.25);
+    let volume = std::env::var("MELOS_PLAY_VOLUME")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .unwrap_or(0.25);
+    engine.set_volume(volume);
 
     let current = spec(&args[0]);
     let next = args.get(1).map(|path| spec(path));

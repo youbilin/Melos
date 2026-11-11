@@ -319,6 +319,11 @@ where
     let mut queue = match shared.queue.try_lock() {
         Ok(queue) => queue,
         Err(_) => {
+            if shared.playing.load(Ordering::Relaxed)
+                && !shared.decoder_done.load(Ordering::Relaxed)
+            {
+                shared.underruns.fetch_add(1, Ordering::Relaxed);
+            }
             for sample in data.iter_mut() {
                 *sample = T::from_sample(0.0);
             }
@@ -335,6 +340,7 @@ where
 
     let volume = f32::from_bits(shared.volume_bits.load(Ordering::Relaxed));
     let mut consumed = 0usize;
+    let mut starved = false;
 
     for sample in data.iter_mut() {
         match queue.pop_front() {
@@ -344,9 +350,16 @@ where
             }
             None => {
                 *sample = T::from_sample(0.0);
-                shared.underruns.fetch_add(1, Ordering::Relaxed);
+                starved = true;
             }
         }
+    }
+
+    if starved && !shared.decoder_done.load(Ordering::Relaxed) {
+        shared.underruns.fetch_add(1, Ordering::Relaxed);
+    }
+    if queue.is_empty() && shared.decoder_done.load(Ordering::Relaxed) {
+        shared.ended.store(true, Ordering::Relaxed);
     }
 
     drop(queue);
@@ -763,6 +776,12 @@ mod tests {
             samples += chunk.len();
         }
         let frames = samples / decoder.channels() as usize;
+        if matches!(extension, "wav" | "flac" | "mp3") {
+            assert_eq!(
+                frames, 44_100,
+                "{extension}: no duplicate delay/padding trim"
+            );
+        }
         assert!(
             (frames as i64 - 44_100).abs() < 4096,
             "{extension}: {frames} frames"
@@ -821,7 +840,7 @@ mod tests {
         assert!(shared.error.lock().unwrap().is_none());
         assert_eq!(shared.track_index.load(Ordering::Relaxed), 1);
         assert_eq!(shared.underruns.load(Ordering::Relaxed), 0);
-        assert!((samples.len() as i64 - 44_100 * 2 * 2).abs() < 8192);
+        assert_eq!(samples.len(), 44_100 * 2 * 2);
         let boundary = 44_100 * 2;
         let rms = |values: &[f32]| {
             (values.iter().map(|value| value * value).sum::<f32>() / values.len() as f32).sqrt()
