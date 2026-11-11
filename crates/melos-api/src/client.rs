@@ -169,6 +169,26 @@ impl Client {
     ) -> Result<Map<String, Value>, Error> {
         let url = self.endpoint(name, params);
         let response = self.send(url).await?;
+        Self::decode_response(response).await
+    }
+
+    async fn post(
+        &self,
+        name: &str,
+        params: &[(&str, String)],
+    ) -> Result<Map<String, Value>, Error> {
+        // Playlist writes are never automatically retried: creating a playlist
+        // twice after a lost response would duplicate remote user data.
+        let response = self
+            .http
+            .post(self.endpoint(name, &[]))
+            .form(params)
+            .send()
+            .await?;
+        Self::decode_response(response).await
+    }
+
+    async fn decode_response(response: reqwest::Response) -> Result<Map<String, Value>, Error> {
         let status = response.status();
         let body = response.text().await?;
 
@@ -274,6 +294,48 @@ impl Client {
     pub async fn playlist(&self, id: &str) -> Result<PlaylistWithSongs, Error> {
         let mut payload = self.get("getPlaylist", &[("id", id.to_owned())]).await?;
         take(&mut payload, "playlist")
+    }
+
+    pub async fn create_playlist(
+        &self,
+        name: &str,
+        songs: &[String],
+    ) -> Result<Option<PlaylistWithSongs>, Error> {
+        let mut params = vec![("name", name.to_owned())];
+        params.extend(songs.iter().cloned().map(|id| ("songId", id)));
+        let mut payload = self.post("createPlaylist", &params).await?;
+        if payload.contains_key("playlist") {
+            take(&mut payload, "playlist").map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn update_playlist(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        add: &[String],
+        remove: &[u32],
+    ) -> Result<(), Error> {
+        let mut params = vec![("playlistId", id.to_owned())];
+        if let Some(name) = name {
+            params.push(("name", name.to_owned()));
+        }
+        params.extend(add.iter().cloned().map(|id| ("songIdToAdd", id)));
+        params.extend(
+            remove
+                .iter()
+                .map(|index| ("songIndexToRemove", index.to_string())),
+        );
+        self.post("updatePlaylist", &params).await?;
+        Ok(())
+    }
+
+    pub async fn delete_playlist(&self, id: &str) -> Result<(), Error> {
+        self.post("deletePlaylist", &[("id", id.to_owned())])
+            .await?;
+        Ok(())
     }
 
     /// Builds a `stream` URL for one song.
@@ -557,5 +619,97 @@ mod tests {
                 .is_err()
         );
         server.await.unwrap();
+    }
+
+    async fn capture_post(body: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0; 4096];
+            loop {
+                let len = socket.read(&mut buffer).await.unwrap();
+                assert!(len > 0);
+                bytes.extend_from_slice(&buffer[..len]);
+                if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+                    let body_len: usize = header
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    if bytes.len() >= end + 4 + body_len {
+                        break;
+                    }
+                }
+                assert!(bytes.len() < 1_000_000);
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(bytes).unwrap()
+        });
+        (format!("http://{address}"), server)
+    }
+
+    #[tokio::test]
+    async fn playlist_update_posts_duplicates_and_zero_based_removals() {
+        let (url, server) = capture_post(r#"{"subsonic-response":{"status":"ok"}}"#).await;
+        client(&url)
+            .update_playlist(
+                "p1",
+                Some("new name"),
+                &["same".into(), "same".into()],
+                &[0, 3],
+            )
+            .await
+            .unwrap();
+        let request = server.await.unwrap();
+        assert!(request.starts_with("POST /rest/updatePlaylist?"));
+        assert!(request.contains("content-type: application/x-www-form-urlencoded"));
+        assert!(request.ends_with("playlistId=p1&name=new+name&songIdToAdd=same&songIdToAdd=same&songIndexToRemove=0&songIndexToRemove=3"));
+    }
+
+    #[tokio::test]
+    async fn playlist_create_preserves_entries_and_legacy_empty_success() {
+        let (url, server) = capture_post(r#"{"subsonic-response":{"status":"ok","playlist":{"id":"p1","name":"created","entry":[{"id":"s1","title":"One"},{"id":"s1","title":"One"}]}}}"#).await;
+        let playlist = client(&url)
+            .create_playlist("created", &["s1".into(), "s1".into()])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(playlist.entry.len(), 2);
+        assert!(
+            server
+                .await
+                .unwrap()
+                .ends_with("name=created&songId=s1&songId=s1")
+        );
+        let (url, server) = capture_post(r#"{"subsonic-response":{"status":"ok"}}"#).await;
+        assert!(
+            client(&url)
+                .create_playlist("empty", &[])
+                .await
+                .unwrap()
+                .is_none()
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn playlist_delete_uses_id_and_surfaces_permission_failure() {
+        let (url, server) =
+            capture_post(r#"{"subsonic-response":{"status":"failed","error":{"code":50}}}"#).await;
+        assert!(matches!(
+            client(&url).delete_playlist("p1").await,
+            Err(Error::NotAuthorized)
+        ));
+        let request = server.await.unwrap();
+        assert!(request.starts_with("POST /rest/deletePlaylist?"));
+        assert!(request.ends_with("id=p1"));
     }
 }

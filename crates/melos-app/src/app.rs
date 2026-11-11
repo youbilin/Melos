@@ -10,8 +10,8 @@ use std::time::Instant;
 use gpui::prelude::*;
 use gpui::*;
 use melos_api::{
-    Album, AlbumWithSongs, Artist, ArtistWithAlbums, Client, Credentials, SearchResult, ServerInfo,
-    Song, StreamQuality,
+    Album, AlbumWithSongs, Artist, ArtistWithAlbums, Client, Credentials, Playlist,
+    PlaylistWithSongs, SearchResult, ServerInfo, Song, StreamQuality,
 };
 use melos_core::artwork::playback_cover_candidates;
 use melos_core::{Queue, RepeatMode, Settings};
@@ -33,6 +33,12 @@ const ALBUM_PAGE_SIZE: u32 = 80;
 enum SliderKind {
     Progress,
     Volume,
+}
+
+#[derive(Clone, Copy)]
+enum PlaylistEditor {
+    Create,
+    Rename,
 }
 
 #[derive(Clone, Copy)]
@@ -113,6 +119,7 @@ pub struct Root {
     username: Entity<TextInput>,
     password: Entity<TextInput>,
     search: Entity<TextInput>,
+    playlist_name: Entity<TextInput>,
 
     connected: bool,
     connecting: bool,
@@ -127,6 +134,13 @@ pub struct Root {
     detail: Option<AlbumWithSongs>,
     artist_view: Option<ArtistWithAlbums>,
     search_result: Option<SearchResult>,
+    playlists: Vec<Playlist>,
+    playlist_detail: Option<PlaylistWithSongs>,
+    requested_playlist: Option<String>,
+    playlists_loading: bool,
+    playlist_pending: bool,
+    playlist_editor: Option<PlaylistEditor>,
+    playlist_delete_confirm: bool,
     covers: HashMap<String, Arc<Image>>,
     visible_cover_ids: HashSet<String>,
     failed_covers: HashMap<String, Instant>,
@@ -174,6 +188,7 @@ impl Root {
             input
         });
         let search = cx.new(|cx| TextInput::new("搜索艺人、专辑或歌曲", cx));
+        let playlist_name = cx.new(|cx| TextInput::new("歌单名称", cx));
         let mut queue = Queue::new();
         queue.set_repeat(settings.repeat);
         queue.set_shuffle(settings.shuffle);
@@ -192,6 +207,7 @@ impl Root {
             username,
             password,
             search,
+            playlist_name,
             connected: false,
             connecting: false,
             error: None,
@@ -204,6 +220,13 @@ impl Root {
             detail: None,
             artist_view: None,
             search_result: None,
+            playlists: Vec::new(),
+            playlist_detail: None,
+            requested_playlist: None,
+            playlists_loading: false,
+            playlist_pending: false,
+            playlist_editor: None,
+            playlist_delete_confirm: false,
             covers: HashMap::new(),
             visible_cover_ids: HashSet::new(),
             failed_covers: HashMap::new(),
@@ -283,6 +306,50 @@ impl Root {
 
     fn handle_response(&mut self, response: Response, cx: &mut Context<Self>) {
         match response {
+            Response::Playlists(list) => {
+                self.playlists = list;
+                self.playlists_loading = false;
+            }
+            Response::Playlist(playlist) => {
+                if self.requested_playlist.as_deref() == Some(&playlist.playlist.id) {
+                    self.playlist_detail = Some(*playlist);
+                    self.playlist_pending = false;
+                }
+            }
+            Response::PlaylistCreated { playlist, error } => {
+                self.playlist_pending = false;
+                if let Some(error) = error {
+                    self.error = Some(error);
+                } else {
+                    self.playlist_editor = None;
+                    self.api.send_priority(Request::Playlists);
+                    if let Some(playlist) = playlist
+                        && self.view == View::Playlists
+                    {
+                        self.requested_playlist = Some(playlist.playlist.id.clone());
+                        self.playlist_detail = Some(*playlist);
+                    }
+                }
+            }
+            Response::PlaylistChanged { id, deleted, error } => {
+                self.playlist_pending = false;
+                if let Some(error) = error {
+                    self.error = Some(error);
+                } else {
+                    self.playlist_editor = None;
+                    self.playlist_delete_confirm = false;
+                    self.api.send_priority(Request::Playlists);
+                    if self.requested_playlist.as_deref() == Some(&id) {
+                        if deleted {
+                            self.playlist_detail = None;
+                            self.requested_playlist = None;
+                        } else {
+                            self.playlist_pending = true;
+                            self.api.send_priority(Request::Playlist { id });
+                        }
+                    }
+                }
+            }
             Response::Connected(info) => {
                 self.connected = true;
                 self.connecting = false;
@@ -379,6 +446,8 @@ impl Root {
                 }
             }
             Response::Error(error) => {
+                self.playlist_pending = false;
+                self.playlists_loading = false;
                 self.albums_loading = false;
                 self.error = Some(error);
                 self.connecting = false;
@@ -554,6 +623,13 @@ impl Root {
                             this.detail = None;
                             this.artist_view = None;
                             this.search_result = None;
+                            this.playlists.clear();
+                            this.playlist_detail = None;
+                            this.requested_playlist = None;
+                            this.playlists_loading = false;
+                            this.playlist_pending = false;
+                            this.playlist_editor = None;
+                            this.playlist_delete_confirm = false;
                             this.api = ApiWorker::new();
                             this.error = None;
                             if let Some(saved) = this.settings.read(cx).password() {
@@ -1182,6 +1258,14 @@ impl Root {
         self.view = view;
         self.detail = None;
         self.artist_view = None;
+        self.playlist_detail = None;
+        self.requested_playlist = None;
+        self.playlist_editor = None;
+        self.playlist_delete_confirm = false;
+        if view == View::Playlists {
+            self.playlists_loading = true;
+            self.api.send_priority(Request::Playlists);
+        }
         cx.notify();
     }
 
@@ -1388,7 +1472,7 @@ impl Root {
                     }
                 }
                 View::Artists => self.artists_view(cx),
-                View::Playlists => placeholder("歌单视图将在 v1.1 接入").into_any_element(),
+                View::Playlists => self.playlists_view(cx).into_any_element(),
                 View::Search => self.search_view(window, cx).into_any_element(),
                 View::Settings => self.settings_view(cx).into_any_element(),
             }
@@ -1508,6 +1592,348 @@ impl Root {
                     )),
             )
             .into_any_element()
+    }
+
+    fn open_playlist(&mut self, id: String, cx: &mut Context<Self>) {
+        self.requested_playlist = Some(id.clone());
+        self.playlist_detail = None;
+        self.playlist_editor = None;
+        self.playlist_delete_confirm = false;
+        self.error = None;
+        self.api.send_priority(Request::Playlist { id });
+        cx.notify();
+    }
+
+    fn submit_playlist_name(&mut self, cx: &mut Context<Self>) {
+        if self.playlist_pending {
+            return;
+        }
+        let name = self.playlist_name.read(cx).content().trim().to_owned();
+        if name.is_empty() {
+            self.error = Some("请输入歌单名称".into());
+            cx.notify();
+            return;
+        }
+        let request = match self.playlist_editor {
+            Some(PlaylistEditor::Create) => Request::CreatePlaylist {
+                name,
+                songs: self
+                    .queue
+                    .songs()
+                    .iter()
+                    .map(|song| song.id.clone())
+                    .collect(),
+            },
+            Some(PlaylistEditor::Rename) => {
+                let Some(playlist) = &self.playlist_detail else {
+                    return;
+                };
+                Request::UpdatePlaylist {
+                    id: playlist.playlist.id.clone(),
+                    name: Some(name),
+                    add: vec![],
+                    remove: vec![],
+                }
+            }
+            None => return,
+        };
+        self.playlist_pending = true;
+        self.error = None;
+        self.api.send_priority(request);
+        cx.notify();
+    }
+
+    fn edit_playlist_songs(
+        &mut self,
+        add_queue: bool,
+        remove: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.playlist_pending {
+            return;
+        }
+        let Some(playlist) = &self.playlist_detail else {
+            return;
+        };
+        let add = if add_queue {
+            self.queue
+                .songs()
+                .iter()
+                .map(|song| song.id.clone())
+                .collect()
+        } else {
+            vec![]
+        };
+        if add_queue && self.queue.is_empty() {
+            return;
+        }
+        self.playlist_pending = true;
+        self.error = None;
+        self.api.send_priority(Request::UpdatePlaylist {
+            id: playlist.playlist.id.clone(),
+            name: None,
+            add,
+            remove: remove.into_iter().collect(),
+        });
+        cx.notify();
+    }
+
+    fn playlists_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut view = div().flex().flex_col().gap_4();
+        if let Some(editor) = self.playlist_editor {
+            view = view.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(ui::muted_label(match editor {
+                        PlaylistEditor::Create => {
+                            "新歌单使用当前队列中的歌曲；空队列会创建空歌单。"
+                        }
+                        PlaylistEditor::Rename => "更改歌单名称",
+                    }))
+                    .child(self.playlist_name.clone())
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(ui::ghost_button(
+                                "playlist-save-name",
+                                if self.playlist_pending {
+                                    "保存中…"
+                                } else {
+                                    "保存"
+                                },
+                                false,
+                                cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                                    this.submit_playlist_name(cx);
+                                }),
+                            ))
+                            .child(ui::ghost_button(
+                                "playlist-cancel-name",
+                                "取消",
+                                false,
+                                cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                                    if !this.playlist_pending {
+                                        this.playlist_editor = None;
+                                        cx.notify();
+                                    }
+                                }),
+                            )),
+                    ),
+            );
+        }
+        if let Some(playlist) = &self.playlist_detail {
+            let songs = Arc::new(playlist.entry.clone());
+            let editable = playlist
+                .playlist
+                .owner
+                .as_deref()
+                .is_none_or(|owner| owner == self.settings.read(cx).username);
+            view = view
+                .child(ui::ghost_button(
+                    "playlist-back",
+                    "← 所有歌单",
+                    false,
+                    cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                        this.playlist_detail = None;
+                        this.requested_playlist = None;
+                        this.playlist_editor = None;
+                        this.playlist_delete_confirm = false;
+                        cx.notify();
+                    }),
+                ))
+                .child(div().text_2xl().child(playlist.playlist.name.clone()))
+                .child(ui::muted_label(format!(
+                    "{} 首 · {}",
+                    playlist.entry.len(),
+                    playlist.playlist.owner.clone().unwrap_or_default()
+                )));
+            let play_songs = songs.clone();
+            let enqueue_songs = songs.clone();
+            view = view.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(ui::ghost_button(
+                        "playlist-play",
+                        "播放全部",
+                        false,
+                        cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                            this.play_songs((*play_songs).clone(), 0, cx);
+                        }),
+                    ))
+                    .child(ui::ghost_button(
+                        "playlist-enqueue",
+                        "加入队列",
+                        false,
+                        cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                            this.enqueue((*enqueue_songs).clone(), false, cx);
+                        }),
+                    ))
+                    .when(editable, |bar| {
+                        bar.child(ui::ghost_button(
+                            "playlist-add-queue",
+                            "将队列追加到歌单",
+                            false,
+                            cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                                this.edit_playlist_songs(true, None, cx);
+                            }),
+                        ))
+                        .child(ui::ghost_button(
+                            "playlist-rename",
+                            "重命名",
+                            false,
+                            cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                                if this.playlist_pending {
+                                    return;
+                                }
+                                let name = this
+                                    .playlist_detail
+                                    .as_ref()
+                                    .map(|playlist| playlist.playlist.name.clone())
+                                    .unwrap_or_default();
+                                this.playlist_name
+                                    .update(cx, |input, cx| input.set_content(name, cx));
+                                this.playlist_editor = Some(PlaylistEditor::Rename);
+                                cx.notify();
+                            }),
+                        ))
+                        .child(ui::ghost_button(
+                            "playlist-delete",
+                            if self.playlist_delete_confirm {
+                                "确认删除歌单"
+                            } else {
+                                "删除歌单"
+                            },
+                            false,
+                            cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                                if this.playlist_pending {
+                                    return;
+                                }
+                                if !this.playlist_delete_confirm {
+                                    this.playlist_delete_confirm = true;
+                                    cx.notify();
+                                    return;
+                                }
+                                let Some(playlist) = &this.playlist_detail else {
+                                    return;
+                                };
+                                this.api.send_priority(Request::DeletePlaylist {
+                                    id: playlist.playlist.id.clone(),
+                                });
+                                this.playlist_pending = true;
+                                cx.notify();
+                            }),
+                        ))
+                    }),
+            );
+            if self.playlist_delete_confirm {
+                view = view.child(ui::muted_label(
+                    "再次点击确认删除歌单，歌曲文件会保留。返回歌单列表可取消。",
+                ));
+            }
+            for (index, song) in playlist.entry.iter().enumerate() {
+                view = view.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().flex_1().min_w_0().child(song_row(
+                            index,
+                            song,
+                            songs.clone(),
+                            cx,
+                        )))
+                        .when(editable, |row| {
+                            row.child(ui::ghost_button(
+                                format!("playlist-remove-{index}"),
+                                "移除",
+                                false,
+                                cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.edit_playlist_songs(false, Some(index as u32), cx);
+                                }),
+                            ))
+                        }),
+                );
+            }
+        } else if self.requested_playlist.is_some() {
+            view = view
+                .child(placeholder(if self.error.is_some() {
+                    "歌单加载失败，返回列表后可重试"
+                } else {
+                    "正在加载歌单…"
+                }))
+                .child(ui::ghost_button(
+                    "playlist-retry-back",
+                    "返回歌单列表",
+                    false,
+                    cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                        this.requested_playlist = None;
+                        cx.notify();
+                    }),
+                ));
+        } else {
+            view = view.child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(ui::ghost_button(
+                        "playlist-create",
+                        "新建歌单",
+                        false,
+                        cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                            if this.playlist_pending {
+                                return;
+                            }
+                            this.playlist_name
+                                .update(cx, |input, cx| input.set_content("", cx));
+                            this.playlist_editor = Some(PlaylistEditor::Create);
+                            cx.notify();
+                        }),
+                    ))
+                    .child(ui::ghost_button(
+                        "playlist-refresh",
+                        "刷新",
+                        false,
+                        cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                            this.api.send_priority(Request::Playlists);
+                            this.playlists_loading = true;
+                            cx.notify();
+                        }),
+                    )),
+            );
+            if self.playlists_loading {
+                view = view.child(ui::muted_label("加载中…"));
+            }
+            for playlist in &self.playlists {
+                let id = playlist.id.clone();
+                view = view.child(
+                    div()
+                        .id(format!("playlist-{id}"))
+                        .flex()
+                        .justify_between()
+                        .p_3()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(theme::HOVER)))
+                        .child(div().text_sm().child(playlist.name.clone()))
+                        .child(ui::muted_label(format!(
+                            "{} 首",
+                            playlist.song_count.unwrap_or(0)
+                        )))
+                        .on_click(cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                            this.open_playlist(id.clone(), cx);
+                        })),
+                );
+            }
+            if self.playlists.is_empty() && !self.playlists_loading {
+                view = view.child(placeholder("暂无歌单，可以从当前队列新建"));
+            }
+        }
+        view
     }
 
     // ------------------------------------------------------------------ albums
@@ -2122,8 +2548,14 @@ impl Render for Root {
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     let in_input = if this.connected {
-                        this.view == View::Search
-                            && this.search.read(cx).contains_position(event.position)
+                        (this.view == View::Search
+                            && this.search.read(cx).contains_position(event.position))
+                            || (this.view == View::Playlists
+                                && this.playlist_editor.is_some()
+                                && this
+                                    .playlist_name
+                                    .read(cx)
+                                    .contains_position(event.position))
                     } else {
                         [&this.server, &this.username, &this.password]
                             .iter()
@@ -2135,7 +2567,13 @@ impl Render for Root {
                 }),
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                let inputs = [&this.server, &this.username, &this.password, &this.search];
+                let inputs = [
+                    &this.server,
+                    &this.username,
+                    &this.password,
+                    &this.search,
+                    &this.playlist_name,
+                ];
                 let editing = inputs
                     .iter()
                     .any(|input| input.read(cx).focus_handle(cx).is_focused(window));
@@ -2188,7 +2626,10 @@ impl Render for Root {
                     input.read(cx).focus_handle(cx).is_focused(window)
                         && !input.read(cx).is_composing()
                 };
-                if this.connected && focused(&this.search) {
+                if this.connected && this.view == View::Playlists && focused(&this.playlist_name) {
+                    this.submit_playlist_name(cx);
+                    cx.stop_propagation();
+                } else if this.connected && focused(&this.search) {
                     this.run_search(cx);
                     cx.stop_propagation();
                 } else if !this.connected

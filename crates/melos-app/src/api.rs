@@ -8,8 +8,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use melos_api::{
-    Album, AlbumListType, AlbumWithSongs, Artist, ArtistWithAlbums, Client, Credentials,
-    SearchResult, ServerInfo,
+    Album, AlbumListType, AlbumWithSongs, Artist, ArtistWithAlbums, Client, Credentials, Playlist,
+    PlaylistWithSongs, SearchResult, ServerInfo,
 };
 use melos_core::cover_cache::CoverCache;
 
@@ -24,6 +24,23 @@ pub enum Request {
         offset: u32,
     },
     Artists,
+    Playlists,
+    Playlist {
+        id: String,
+    },
+    CreatePlaylist {
+        name: String,
+        songs: Vec<String>,
+    },
+    UpdatePlaylist {
+        id: String,
+        name: Option<String>,
+        add: Vec<String>,
+        remove: Vec<u32>,
+    },
+    DeletePlaylist {
+        id: String,
+    },
     Album {
         id: String,
     },
@@ -55,6 +72,17 @@ pub enum Response {
         size: u32,
     },
     Artists(Vec<Artist>),
+    Playlists(Vec<Playlist>),
+    Playlist(Box<PlaylistWithSongs>),
+    PlaylistCreated {
+        playlist: Option<Box<PlaylistWithSongs>>,
+        error: Option<String>,
+    },
+    PlaylistChanged {
+        id: String,
+        deleted: bool,
+        error: Option<String>,
+    },
     Album(Box<AlbumWithSongs>),
     Artist(Box<ArtistWithAlbums>),
     Search(Box<SearchResult>),
@@ -174,6 +202,77 @@ fn run(requests: Receiver<Request>, priority: Receiver<Request>, responses: Send
 
 async fn handle(client: &mut Option<Client>, request: Request) -> Response {
     match request {
+        Request::Playlists => {
+            let Some(client) = client.as_ref() else {
+                return Response::Error("尚未连接服务器".into());
+            };
+            match client.playlists().await {
+                Ok(list) => Response::Playlists(list),
+                Err(error) => Response::Error(error.to_string()),
+            }
+        }
+        Request::Playlist { id } => {
+            let Some(client) = client.as_ref() else {
+                return Response::Error("尚未连接服务器".into());
+            };
+            match client.playlist(&id).await {
+                Ok(playlist) => Response::Playlist(Box::new(playlist)),
+                Err(error) => Response::Error(error.to_string()),
+            }
+        }
+        Request::CreatePlaylist { name, songs } => {
+            let Some(client) = client.as_ref() else {
+                return Response::PlaylistCreated {
+                    playlist: None,
+                    error: Some("尚未连接服务器".into()),
+                };
+            };
+            match client.create_playlist(&name, &songs).await {
+                Ok(playlist) => Response::PlaylistCreated {
+                    playlist: playlist.map(Box::new),
+                    error: None,
+                },
+                Err(error) => Response::PlaylistCreated {
+                    playlist: None,
+                    error: Some(error.to_string()),
+                },
+            }
+        }
+        Request::UpdatePlaylist {
+            id,
+            name,
+            add,
+            remove,
+        } => {
+            let error = match client.as_ref() {
+                Some(client) => client
+                    .update_playlist(&id, name.as_deref(), &add, &remove)
+                    .await
+                    .err()
+                    .map(|error| error.to_string()),
+                None => Some("尚未连接服务器".into()),
+            };
+            Response::PlaylistChanged {
+                id,
+                deleted: false,
+                error,
+            }
+        }
+        Request::DeletePlaylist { id } => {
+            let error = match client.as_ref() {
+                Some(client) => client
+                    .delete_playlist(&id)
+                    .await
+                    .err()
+                    .map(|error| error.to_string()),
+                None => Some("尚未连接服务器".into()),
+            };
+            Response::PlaylistChanged {
+                id,
+                deleted: true,
+                error,
+            }
+        }
         Request::Connect {
             server,
             username,
