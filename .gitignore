@@ -1,0 +1,12 @@
+**/target/
+**/*.rs.bk
+*.pdb
+*.exe
+*.out
+*.err
+*.zip
+.env
+.env.*
+settings.json
+/output/
+.DS_Store

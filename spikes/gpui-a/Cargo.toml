@@ -1,0 +1,11 @@
+[package]
+name = "spike-gpui-a"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+gpui = { package = "gpui-unofficial", version = "=1.28.0-pre" }
+gpui_platform = { package = "gpui-platform-gpui-unofficial", version = "=1.28.0-pre" }
+unicode-segmentation = "1"

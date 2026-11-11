@@ -1,0 +1,10 @@
+[package]
+name = "spike-audio"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+symphonia = { version = "0.6.1", features = ["all-codecs", "all-formats", "all-meta"] }
+cpal = "0.18.2"
