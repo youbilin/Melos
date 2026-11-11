@@ -11,6 +11,7 @@ use melos_api::{
     Album, AlbumListType, AlbumWithSongs, Artist, ArtistWithAlbums, Client, Credentials,
     SearchResult, ServerInfo,
 };
+use melos_core::cover_cache::CoverCache;
 
 pub enum Request {
     Connect {
@@ -48,15 +49,27 @@ pub enum Request {
 
 pub enum Response {
     Connected(Box<ServerInfo>),
-    Albums(Vec<Album>),
+    Albums {
+        albums: Vec<Album>,
+        offset: u32,
+        size: u32,
+    },
     Artists(Vec<Artist>),
     Album(Box<AlbumWithSongs>),
     Artist(Box<ArtistWithAlbums>),
     Search(Box<SearchResult>),
-    Cover { id: String, bytes: Vec<u8> },
-    CoverFailed { id: String },
+    Cover {
+        id: String,
+        bytes: Vec<u8>,
+    },
+    CoverFailed {
+        id: String,
+    },
     Scrobbled,
-    Starred { id: String, error: Option<String> },
+    Starred {
+        id: String,
+        error: Option<String>,
+    },
     Error(String),
 }
 
@@ -112,6 +125,7 @@ fn run(requests: Receiver<Request>, priority: Receiver<Request>, responses: Send
     };
 
     let mut client: Option<Client> = None;
+    let mut cache: Option<CoverCache> = None;
 
     loop {
         let request = match priority.try_recv() {
@@ -122,7 +136,36 @@ fn run(requests: Receiver<Request>, priority: Receiver<Request>, responses: Send
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             },
         };
-        let response = runtime.block_on(handle(&mut client, request));
+        let scope = match &request {
+            Request::Connect {
+                server, username, ..
+            } => CoverCache::for_server(server, username),
+            _ => None,
+        };
+        let cover_key = match &request {
+            Request::Cover { id, size } => Some((id.clone(), *size)),
+            _ => None,
+        };
+        let cached = cover_key.as_ref().and_then(|(id, size)| {
+            cache
+                .as_ref()?
+                .read(id, *size)
+                .map(|bytes| Response::Cover {
+                    id: id.clone(),
+                    bytes,
+                })
+        });
+        let from_cache = cached.is_some();
+        let response = cached.unwrap_or_else(|| runtime.block_on(handle(&mut client, request)));
+        if matches!(response, Response::Connected(_)) {
+            cache = scope;
+        }
+        if !from_cache
+            && let (Some(cache), Some((id, size)), Response::Cover { bytes, .. }) =
+                (&cache, &cover_key, &response)
+        {
+            cache.write(id, *size, bytes);
+        }
         if responses.send(response).is_err() {
             break;
         }
@@ -151,7 +194,11 @@ async fn handle(client: &mut Option<Client>, request: Request) -> Response {
                 return Response::Error("尚未连接服务器".into());
             };
             match client.album_list(AlbumListType::Newest, size, offset).await {
-                Ok(albums) => Response::Albums(albums),
+                Ok(albums) => Response::Albums {
+                    albums,
+                    offset,
+                    size,
+                },
                 Err(error) => Response::Error(error.to_string()),
             }
         }

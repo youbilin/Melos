@@ -4,6 +4,7 @@
 //! nor ratatui appear in its dependency graph.
 
 pub mod artwork;
+pub mod cover_cache;
 pub mod queue;
 pub mod settings;
 

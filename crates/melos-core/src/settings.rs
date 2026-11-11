@@ -64,7 +64,10 @@ impl Default for Settings {
 
 impl Settings {
     fn path() -> Option<PathBuf> {
-        dirs::config_dir().map(|dir| dir.join("melos").join(FILE_NAME))
+        std::env::var_os("MELOS_CONFIG_DIR")
+            .map(PathBuf::from)
+            .or_else(|| dirs::config_dir().map(|dir| dir.join("melos")))
+            .map(|dir| dir.join(FILE_NAME))
     }
 
     /// Loads the saved settings, or defaults when the file does not exist.

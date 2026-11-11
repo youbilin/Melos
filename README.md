@@ -67,6 +67,7 @@ cmd /c '"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxilia
 - [x] 队列编辑：下一首播放、歌曲/整张专辑追加、移除、拖动/按钮排序、清空待播；保留当前歌曲和暂停状态
 - [x] 随机播放、单曲/列表循环，与预取和队列编辑联动；模式随设置保存
 - [x] 播放快捷键，输入框/中文输入法组合保护；快捷键列表在设置页
+- [x] 曲库专辑分页与可见行渲染、按需封面、失败重试；磁盘封面缓存按服务器/账号隔离
 - [x] 设置与持久化：音质、音量、连接信息、DPAPI 密码保护与密码掩码
 - [x] 仓库自带音频测试素材，多格式解码、seek、gapless 与断流恢复回归测试
 - [x] M6 首版：release 优化、应用图标/版本信息、Windows 绿色版 ZIP 与校验和
@@ -74,7 +75,7 @@ cmd /c '"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxilia
 - [ ] 发布验收：真实媒体键、两小时连续播放、完整应用性能目标
 - [ ] Phase 2：歌词、歌单、TUI
 
-Opus、WMA、APE、DSD 等无法本地解码的格式显式请求服务端转为 MP3。专辑分页/虚拟化、磁盘封面缓存仍待实现。歌单仅有 API，桌面歌单页与歌词/TUI 尚未实现。
+Opus、WMA、APE、DSD 等无法本地解码的格式显式请求服务端转为 MP3。歌单仅有 API，桌面歌单页与歌词/TUI 尚未实现；歌曲与队列长列表虚拟化仍可继续完善。
 
 ## Windows 绿色版
 

@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use gpui::prelude::*;
 use gpui::*;
@@ -26,6 +27,7 @@ const QUEUE_WIDTH: f32 = 340.0;
 const CONTENT_PADDING: f32 = 64.0;
 const CARD_MIN: f32 = 160.0;
 const CARD_GAP: f32 = 24.0;
+const ALBUM_PAGE_SIZE: u32 = 80;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SliderKind {
@@ -118,11 +120,16 @@ pub struct Root {
     server_info: Option<ServerInfo>,
 
     albums: Vec<Album>,
+    album_offset: u32,
+    albums_loading: bool,
+    albums_more: bool,
     artists: Vec<Artist>,
     detail: Option<AlbumWithSongs>,
     artist_view: Option<ArtistWithAlbums>,
     search_result: Option<SearchResult>,
     covers: HashMap<String, Arc<Image>>,
+    visible_cover_ids: HashSet<String>,
+    failed_covers: HashMap<String, Instant>,
     cover_requests: HashSet<String>,
     priority_cover_requests: HashSet<String>,
     playing_cover_ids: Vec<String>,
@@ -190,11 +197,16 @@ impl Root {
             error: None,
             server_info: None,
             albums: Vec::new(),
+            album_offset: 0,
+            albums_loading: false,
+            albums_more: true,
             artists: Vec::new(),
             detail: None,
             artist_view: None,
             search_result: None,
             covers: HashMap::new(),
+            visible_cover_ids: HashSet::new(),
+            failed_covers: HashMap::new(),
             cover_requests: HashSet::new(),
             priority_cover_requests: HashSet::new(),
             playing_cover_ids: Vec::new(),
@@ -279,15 +291,27 @@ impl Root {
                 self.save_settings(cx);
                 self.password
                     .update(cx, |input, cx| input.set_content("", cx));
-                self.api.send(Request::Albums {
-                    size: 200,
-                    offset: 0,
-                });
+                self.load_more_albums(cx);
                 self.api.send(Request::Artists);
             }
-            Response::Albums(albums) => {
-                self.request_covers(albums.iter().filter_map(|album| album.cover_art.as_deref()));
-                self.albums = albums;
+            Response::Albums {
+                albums,
+                offset,
+                size,
+            } => {
+                if offset != self.album_offset {
+                    return;
+                }
+                self.albums_loading = false;
+                self.albums_more = albums.len() == size as usize;
+                self.album_offset += albums.len() as u32;
+                let mut known: HashSet<_> =
+                    self.albums.iter().map(|album| album.id.clone()).collect();
+                self.albums.extend(
+                    albums
+                        .into_iter()
+                        .filter(|album| known.insert(album.id.clone())),
+                );
             }
             Response::Artists(artists) => self.artists = artists,
             Response::Album(album) => {
@@ -318,13 +342,32 @@ impl Root {
                 self.cover_requests.remove(&id);
                 self.priority_cover_requests.remove(&id);
                 if let Some(format) = guess_image_format(&bytes) {
+                    self.failed_covers.remove(&id);
                     self.covers
                         .insert(id, Arc::new(Image::from_bytes(format, bytes)));
+                    while self.covers.len() > 128 {
+                        let key = self
+                            .covers
+                            .keys()
+                            .find(|id| {
+                                !self.visible_cover_ids.contains(*id)
+                                    && !self.playing_cover_ids.contains(*id)
+                            })
+                            .cloned();
+                        if let Some(key) = key {
+                            self.covers.remove(&key);
+                        } else {
+                            break;
+                        }
+                    }
+                } else {
+                    self.failed_covers.insert(id, Instant::now());
                 }
             }
             Response::CoverFailed { id } => {
                 self.cover_requests.remove(&id);
                 self.priority_cover_requests.remove(&id);
+                self.failed_covers.insert(id, Instant::now());
             }
             Response::Scrobbled => {}
             Response::Starred { id, error } => {
@@ -336,6 +379,7 @@ impl Root {
                 }
             }
             Response::Error(error) => {
+                self.albums_loading = false;
                 self.error = Some(error);
                 self.connecting = false;
             }
@@ -344,7 +388,14 @@ impl Root {
 
     /// Requests covers for the first screenful, once per cover id.
     fn request_covers<'a>(&mut self, ids: impl Iterator<Item = &'a str>) {
-        for id in ids.take(80) {
+        for id in ids {
+            if self
+                .failed_covers
+                .get(id)
+                .is_some_and(|failed| failed.elapsed() < Duration::from_secs(30))
+            {
+                continue;
+            }
             if self.covers.contains_key(id) {
                 continue;
             }
@@ -356,6 +407,19 @@ impl Root {
                 size: 240,
             });
         }
+    }
+
+    fn load_more_albums(&mut self, cx: &mut Context<Self>) {
+        if self.albums_loading || !self.albums_more || !self.connected {
+            return;
+        }
+        self.albums_loading = true;
+        self.error = None;
+        self.api.send_priority(Request::Albums {
+            size: ALBUM_PAGE_SIZE,
+            offset: self.album_offset,
+        });
+        cx.notify();
     }
 
     fn set_now_playing(&mut self, song: Song) {
@@ -476,8 +540,13 @@ impl Root {
                             this.queue.clear();
                             this.now_playing = None;
                             this.albums.clear();
+                            this.album_offset = 0;
+                            this.albums_loading = false;
+                            this.albums_more = true;
                             this.artists.clear();
                             this.covers.clear();
+                            this.visible_cover_ids.clear();
+                            this.failed_covers.clear();
                             this.cover_requests.clear();
                             this.priority_cover_requests.clear();
                             this.playing_cover_ids.clear();
@@ -1298,7 +1367,13 @@ impl Root {
             .child(ui::muted_label(status))
     }
 
-    fn body(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn body(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.detail.is_none()
+            && self.artist_view.is_none()
+            && matches!(self.view, View::Home | View::Albums)
+        {
+            return self.library_view(window, cx);
+        }
         let content: AnyElement = if let Some(detail) = &self.detail {
             self.detail_view(detail, cx).into_any_element()
         } else if let Some(artist) = &self.artist_view {
@@ -1327,6 +1402,112 @@ impl Root {
             .px_8()
             .pb_8()
             .child(content)
+            .into_any_element()
+    }
+
+    fn library_view(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let columns = grid_columns(window, self.queue_open);
+        let available = window.viewport_size().width.as_f32()
+            - SIDEBAR_WIDTH
+            - CONTENT_PADDING
+            - if self.queue_open { QUEUE_WIDTH } else { 0. };
+        let card_width = ((available - CARD_GAP * (columns - 1) as f32) / columns as f32).max(80.);
+        let rows = self.albums.len().div_ceil(columns);
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .overflow_hidden()
+            .px_8()
+            .pb_8()
+            .gap_3()
+            .child(
+                uniform_list(
+                    "album-library",
+                    rows,
+                    cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                        let visible: Vec<_> = range
+                            .clone()
+                            .flat_map(|row| {
+                                row * columns..((row + 1) * columns).min(this.albums.len())
+                            })
+                            .map(|index| (index, this.albums[index].clone()))
+                            .collect();
+                        this.visible_cover_ids = visible
+                            .iter()
+                            .map(|(_, album)| {
+                                album.cover_art.clone().unwrap_or_else(|| album.id.clone())
+                            })
+                            .collect();
+                        this.request_covers(
+                            visible
+                                .iter()
+                                .map(|(_, album)| album.cover_art.as_deref().unwrap_or(&album.id)),
+                        );
+                        range
+                            .map(|row| {
+                                div()
+                                    .h(px(card_width + 78.))
+                                    .pb_6()
+                                    .grid()
+                                    .grid_cols(columns as u16)
+                                    .gap_6()
+                                    .w_full()
+                                    .children(
+                                        visible
+                                            .iter()
+                                            .filter(|(index, _)| *index / columns == row)
+                                            .map(|(index, album)| {
+                                                this.album_card(*index, album, cx)
+                                                    .into_any_element()
+                                            }),
+                                    )
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .flex_1()
+                .min_h_0()
+                .w_full(),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(ui::muted_label(format!(
+                        "已加载 {} 张专辑",
+                        self.albums.len()
+                    )))
+                    .when(self.albums_more, |bar| {
+                        bar.child(ui::ghost_button(
+                            "load-more-albums",
+                            if self.albums_loading {
+                                "加载中…"
+                            } else {
+                                "加载更多"
+                            },
+                            false,
+                            cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                                this.load_more_albums(cx);
+                            }),
+                        ))
+                    })
+                    .child(ui::ghost_button(
+                        "retry-covers",
+                        "重试封面",
+                        false,
+                        cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                            this.failed_covers.clear();
+                            if let Some(song) = this.now_playing.clone() {
+                                this.set_now_playing(song);
+                            }
+                            cx.notify();
+                        }),
+                    )),
+            )
+            .into_any_element()
     }
 
     // ------------------------------------------------------------------ albums
@@ -1382,12 +1563,13 @@ impl Root {
             .gap_2()
             .min_w_0()
             .cursor_pointer()
-            .child(self.cover(album.cover_art.as_deref(), index))
-            .child(div().text_sm().child(album.name.clone()))
+            .child(self.cover(Some(album.cover_art.as_deref().unwrap_or(&album.id)), index))
+            .child(div().text_sm().truncate().child(album.name.clone()))
             .child(
                 div()
                     .text_xs()
                     .text_color(rgb(theme::TEXT_MUTED))
+                    .truncate()
                     .child(artist),
             )
             .on_click(
