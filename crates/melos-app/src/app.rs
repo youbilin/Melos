@@ -153,6 +153,10 @@ pub struct Root {
     playing_cover_ids: Vec<String>,
     settings: Entity<Settings>,
     smtc: Option<smtc::Smtc>,
+    #[cfg(windows)]
+    smtc_artwork: Option<(String, u64)>,
+    #[cfg(windows)]
+    smtc_artwork_request: u64,
     smoke_reported: bool,
 
     client: Option<Client>,
@@ -247,6 +251,10 @@ impl Root {
             playing_cover_ids: Vec::new(),
             settings: saved_settings,
             smtc: None,
+            #[cfg(windows)]
+            smtc_artwork: None,
+            #[cfg(windows)]
+            smtc_artwork_request: 0,
             smoke_reported: false,
             client: None,
             engine: Engine::new().ok(),
@@ -557,6 +565,62 @@ impl Root {
         self.lyrics_active = None;
         self.lyrics_scroll = ScrollHandle::new();
         self.lyrics_follow = true;
+    }
+
+    #[cfg(windows)]
+    fn sync_smtc_artwork(&mut self, cx: &mut Context<Self>) {
+        if self.smtc.as_ref().is_none_or(|smtc| !smtc.available()) {
+            return;
+        }
+        let selected = self.now_playing.as_ref().and_then(|_| {
+            self.playing_cover_ids.iter().find_map(|id| {
+                self.covers
+                    .get(id)
+                    .map(|image| ((id.clone(), image.id()), image.clone()))
+            })
+        });
+        let key = selected.as_ref().map(|(key, _)| key.clone());
+        if self.smtc_artwork == key {
+            return;
+        }
+        self.smtc_artwork = key;
+        self.smtc_artwork_request = self.smtc_artwork_request.wrapping_add(1);
+        let request = self.smtc_artwork_request;
+        if let Some(smtc) = self.smtc.as_ref() {
+            let _ = smtc.set_artwork(None);
+        }
+        let Some((_, image)) = selected else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let prepared = cx
+                .background_executor()
+                .spawn(async move { smtc::prepare_artwork(&image.bytes).await })
+                .await;
+            let _ = this.update(cx, |this, _| {
+                // A completed conversion must not put a previous song's image
+                // back in the system panel after a switch, stop or fallback.
+                if this.smtc_artwork_request == request
+                    && let Some(smtc) = this.smtc.as_ref()
+                {
+                    let current = this.now_playing.as_ref().and_then(|_| {
+                        this.playing_cover_ids.iter().find_map(|id| {
+                            this.covers.get(id).map(|image| (id.clone(), image.id()))
+                        })
+                    });
+                    if current != this.smtc_artwork {
+                        return;
+                    }
+                    match prepared {
+                        Ok(image) => {
+                            let _ = smtc.set_artwork(Some(&image));
+                        }
+                        Err(error) => eprintln!("melos: SMTC artwork failed: {error}"),
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     fn request_lyrics(&mut self, song: &Song) {
@@ -1290,7 +1354,7 @@ impl Root {
 
     /// Pulls the engine snapshot into the UI state. Returns true when a redraw
     /// is warranted.
-    fn sync_engine(&mut self, _cx: &Context<Self>) -> bool {
+    fn sync_engine(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(engine) = self.engine.as_ref() else {
             return false;
         };
@@ -1368,7 +1432,14 @@ impl Root {
             changed = true;
         }
 
-        if changed && let Some(smtc) = self.smtc.as_ref() {
+        self.sync_smtc_playback();
+        #[cfg(windows)]
+        self.sync_smtc_artwork(cx);
+        changed
+    }
+
+    fn sync_smtc_playback(&self) {
+        if let Some(smtc) = self.smtc.as_ref() {
             match self.now_playing.as_ref() {
                 Some(song) => {
                     smtc.update(
@@ -1382,8 +1453,6 @@ impl Root {
                 None => smtc.set_status(None),
             }
         }
-
-        changed
     }
 
     fn run_search(&mut self, cx: &mut Context<Self>) {
@@ -2803,6 +2872,9 @@ impl Render for Root {
         if self.smtc.is_none() {
             self.smtc = Some(smtc::Smtc::attach(window));
         }
+        self.sync_smtc_playback();
+        #[cfg(windows)]
+        self.sync_smtc_artwork(cx);
         if !self.smoke_reported
             && let Some(path) = std::env::var_os("MELOS_SMOKE_REPORT")
         {

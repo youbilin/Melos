@@ -1,4 +1,4 @@
-Melos 0.1.2 — development preview
+Melos 0.1.3 — development preview
 
 Extract this folder and run melos.exe on Windows 10 (1903+)/11 (x64).
 For terminal playback, first save a connection in the desktop app, then
@@ -19,6 +19,7 @@ Playback bar: shuffle, repeat off/all/one, Lyrics and Queue.
 Queue entries support next-play insertion, append, removal and reordering.
 Playlists support browse/play/create/append/remove/rename/confirmed delete.
 Lyrics support timed highlighting, following, line seeking and plain text.
+Windows system media controls receive the current song's cached cover image.
 Space toggles playback; arrows seek 5 seconds; Ctrl+arrows switch tracks
 or adjust volume. Ctrl+S/R/Q/F control shuffle/repeat/queue/search.
 If the audio device disconnects, use Settings > Reconnect audio output

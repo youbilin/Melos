@@ -88,7 +88,7 @@ Opus、WMA、APE、DSD 等无法本地解码的格式显式请求服务端转为
 ./packaging/build-windows.ps1
 ```
 
-产物在 `output/release/`，包含 ZIP 和 SHA256。程序要求 Windows 10 1903+ / Windows 11（x64）以及 Microsoft Visual C++ 2015–2022 Redistributable（x64）。当前 0.1.2 版本为开发预览，包含桌面与终端程序，以及队列编辑、随机/循环、分页曲库、歌单、歌词与音频输出重连。
+产物在 `output/release/`，包含 ZIP 和 SHA256。程序要求 Windows 10 1903+ / Windows 11（x64）以及 Microsoft Visual C++ 2015–2022 Redistributable（x64）。当前 0.1.3 版本为开发预览，包含桌面与终端程序，以及队列编辑、随机/循环、分页曲库、歌单、歌词、音频输出重连和系统媒体封面；最小化时继续同步系统媒体状态。
 
 音频设备断开后，在桌面设置页点“重新连接音频输出”，或在终端按 `e`。重新打开默认设备并保留歌曲、队列和播放位置；确认设备后按播放继续。
 
@@ -99,6 +99,8 @@ Opus、WMA、APE、DSD 等无法本地解码的格式显式请求服务端转为
 cmd /c '"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && cargo test -p melos-player stream_recovers_after_thirty_seconds_offline -- --ignored'
 # 静音的本地素材/默认设备长测，记录进度漂移、内存、队列与重连检查
 cmd /c '"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && cargo run -p melos-player --example soak --release --locked -- --seconds 7200 --report output/playback-soak.json'
+# 使用桌面已保存连接，静音检查真实服务器格式样本的播放/暂停/seek；不改设置或服务端数据
+cmd /c '"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && cargo run -p melos-core --example server_check --release --locked -- --albums 30 --report output/server-check.json'
 ```
 
 项目保持私有；完成并验证的改动按批次提交、推送，见 [项目工作约定](AGENTS.md)。
