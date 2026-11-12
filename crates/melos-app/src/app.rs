@@ -29,6 +29,15 @@ const CONTENT_PADDING: f32 = 64.0;
 const CARD_MIN: f32 = 160.0;
 const CARD_GAP: f32 = 24.0;
 const ALBUM_PAGE_SIZE: u32 = 80;
+const SONG_ROW_HEIGHT: f32 = 76.0;
+const QUEUE_ROW_HEIGHT: f32 = 76.0;
+
+#[derive(Clone, Copy)]
+enum SongSource {
+    Album,
+    Playlist,
+    Search,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SliderKind {
@@ -115,6 +124,8 @@ pub struct Root {
     view: View,
     playing: bool,
     queue_open: bool,
+    queue_scroll: UniformListScrollHandle,
+    search_results_generation: u64,
     volume: f32,
     slider_drag: Option<SliderDrag>,
     pending_stars: HashMap<String, Option<String>>,
@@ -216,6 +227,8 @@ impl Root {
             view: View::Home,
             playing: false,
             queue_open: false,
+            queue_scroll: UniformListScrollHandle::new(),
+            search_results_generation: 0,
             volume,
             slider_drag: None,
             pending_stars: HashMap::new(),
@@ -444,6 +457,7 @@ impl Root {
                         .filter_map(|album| album.cover_art.as_deref()),
                 );
                 self.search_result = Some(*result);
+                self.search_results_generation = self.search_results_generation.wrapping_add(1);
             }
             Response::Cover { id, bytes } => {
                 self.cover_requests.remove(&id);
@@ -1669,15 +1683,37 @@ impl Root {
         if self.view == View::Lyrics {
             return self.lyrics_view(cx);
         }
+        if let Some(detail) = &self.detail {
+            return div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .px_8()
+                .pb_8()
+                .child(self.detail_view(detail, cx))
+                .into_any_element();
+        }
+        if self.view == View::Playlists && self.playlist_detail.is_some() {
+            return div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .px_8()
+                .pb_8()
+                .child(self.playlists_view(cx))
+                .into_any_element();
+        }
         if self.detail.is_none()
             && self.artist_view.is_none()
             && matches!(self.view, View::Home | View::Albums)
         {
             return self.library_view(window, cx);
         }
-        let content: AnyElement = if let Some(detail) = &self.detail {
-            self.detail_view(detail, cx).into_any_element()
-        } else if let Some(artist) = &self.artist_view {
+        let content: AnyElement = if let Some(artist) = &self.artist_view {
             self.artist_view(artist, window, cx).into_any_element()
         } else {
             match self.view {
@@ -1942,7 +1978,6 @@ impl Root {
             );
         }
         if let Some(playlist) = &self.playlist_detail {
-            let songs = Arc::new(playlist.entry.clone());
             let editable = playlist
                 .playlist
                 .owner
@@ -1967,8 +2002,6 @@ impl Root {
                     playlist.entry.len(),
                     playlist.playlist.owner.clone().unwrap_or_default()
                 )));
-            let play_songs = songs.clone();
-            let enqueue_songs = songs.clone();
             view = view.child(
                 div()
                     .flex()
@@ -1979,7 +2012,7 @@ impl Root {
                         "播放全部",
                         false,
                         cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
-                            this.play_songs((*play_songs).clone(), 0, cx);
+                            this.play_source(SongSource::Playlist, 0, cx);
                         }),
                     ))
                     .child(ui::ghost_button(
@@ -1987,7 +2020,7 @@ impl Root {
                         "加入队列",
                         false,
                         cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
-                            this.enqueue((*enqueue_songs).clone(), false, cx);
+                            this.enqueue_source(SongSource::Playlist, cx);
                         }),
                     ))
                     .when(editable, |bar| {
@@ -2052,31 +2085,10 @@ impl Root {
                     "再次点击确认删除歌单，歌曲文件会保留。返回歌单列表可取消。",
                 ));
             }
-            for (index, song) in playlist.entry.iter().enumerate() {
-                view = view.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(div().flex_1().min_w_0().child(song_row(
-                            index,
-                            song,
-                            songs.clone(),
-                            cx,
-                        )))
-                        .when(editable, |row| {
-                            row.child(ui::ghost_button(
-                                format!("playlist-remove-{index}"),
-                                "移除",
-                                false,
-                                cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    this.edit_playlist_songs(false, Some(index as u32), cx);
-                                }),
-                            ))
-                        }),
-                );
-            }
+            view = view
+                .flex_1()
+                .min_h_0()
+                .child(self.song_list(SongSource::Playlist, cx));
         } else if self.requested_playlist.is_some() {
             view = view
                 .child(placeholder(if self.error.is_some() {
@@ -2156,6 +2168,107 @@ impl Root {
 
     // ------------------------------------------------------------------ albums
 
+    fn source_songs(&self, source: SongSource) -> &[Song] {
+        match source {
+            SongSource::Album => self.detail.as_ref().map(|album| album.song.as_slice()),
+            SongSource::Playlist => self
+                .playlist_detail
+                .as_ref()
+                .map(|playlist| playlist.entry.as_slice()),
+            SongSource::Search => self
+                .search_result
+                .as_ref()
+                .map(|result| result.song.as_slice()),
+        }
+        .unwrap_or(&[])
+    }
+
+    fn play_source(&mut self, source: SongSource, index: usize, cx: &mut Context<Self>) {
+        let songs = self.source_songs(source);
+        if index < songs.len() {
+            self.play_songs(songs.to_vec(), index, cx);
+        }
+    }
+
+    fn enqueue_source(&mut self, source: SongSource, cx: &mut Context<Self>) {
+        let songs = self.source_songs(source).to_vec();
+        self.enqueue(songs, false, cx);
+    }
+
+    fn song_list(&self, source: SongSource, cx: &mut Context<Self>) -> AnyElement {
+        let id = match source {
+            SongSource::Album => format!(
+                "album-songs-{}",
+                self.detail
+                    .as_ref()
+                    .map(|album| album.album.id.as_str())
+                    .unwrap_or_default()
+            ),
+            SongSource::Playlist => format!(
+                "playlist-songs-{}",
+                self.playlist_detail
+                    .as_ref()
+                    .map(|playlist| playlist.playlist.id.as_str())
+                    .unwrap_or_default()
+            ),
+            SongSource::Search => format!("search-songs-{}", self.search_results_generation),
+        };
+        let count = self.source_songs(source).len();
+        let editable = matches!(source, SongSource::Playlist)
+            && self.playlist_detail.as_ref().is_some_and(|playlist| {
+                playlist
+                    .playlist
+                    .owner
+                    .as_deref()
+                    .is_none_or(|owner| owner == self.settings.read(cx).username)
+            });
+        uniform_list(
+            id,
+            count,
+            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                range
+                    .filter_map(|index| {
+                        this.source_songs(source).get(index).map(|song| {
+                            div()
+                                .h(px(SONG_ROW_HEIGHT))
+                                .w_full()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(song_row(index, song, source, cx)),
+                                )
+                                .when(editable, |row| {
+                                    row.child(ui::ghost_button(
+                                        format!("playlist-remove-{index}"),
+                                        "移除",
+                                        false,
+                                        cx.listener(
+                                            move |this: &mut Root, _: &ClickEvent, _, cx| {
+                                                cx.stop_propagation();
+                                                this.edit_playlist_songs(
+                                                    false,
+                                                    Some(index as u32),
+                                                    cx,
+                                                );
+                                            },
+                                        ),
+                                    ))
+                                })
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .into_any_element()
+    }
+
     fn album_grid(&self, albums: &[Album], window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let columns = grid_columns(window, self.queue_open);
 
@@ -2224,20 +2337,14 @@ impl Root {
     }
 
     fn detail_view(&self, album: &AlbumWithSongs, cx: &mut Context<Self>) -> impl IntoElement {
-        let songs_arc = Arc::new(album.song.clone());
-        let mut songs = div().flex().flex_col().gap_1();
-
-        for (index, song) in album.song.iter().enumerate() {
-            songs = songs.child(song_row(index, song, songs_arc.clone(), cx));
-        }
+        let songs = self.song_list(SongSource::Album, cx);
 
         let play_all = {
-            let songs = songs_arc.clone();
             ui::primary_button(
                 "播放全部",
                 true,
                 cx.listener(move |this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
-                    this.play_songs((*songs).clone(), 0, cx);
+                    this.play_source(SongSource::Album, 0, cx);
                 }),
             )
         };
@@ -2245,11 +2352,14 @@ impl Root {
         div()
             .flex()
             .flex_col()
+            .flex_1()
+            .min_h_0()
             .gap_5()
             .child(back_button(cx))
             .child(
                 div()
                     .flex()
+                    .flex_shrink_0()
                     .items_end()
                     .gap_5()
                     .child(
@@ -2279,7 +2389,7 @@ impl Root {
                                         false,
                                         cx.listener(
                                             move |this: &mut Root, _: &ClickEvent, _, cx| {
-                                                this.enqueue((*songs_arc).clone(), false, cx);
+                                                this.enqueue_source(SongSource::Album, cx);
                                             },
                                         ),
                                     ))
@@ -2413,11 +2523,11 @@ impl Root {
         }
 
         if !result.song.is_empty() {
-            let songs_arc = Arc::new(result.song.clone());
-            let mut songs = div().flex().flex_col().gap_1();
-            for (index, song) in result.song.iter().enumerate() {
-                songs = songs.child(song_row(index, song, songs_arc.clone(), cx));
-            }
+            let songs = div()
+                .flex()
+                .flex_col()
+                .h(px((result.song.len() as f32 * SONG_ROW_HEIGHT).min(456.)))
+                .child(self.song_list(SongSource::Search, cx));
             sections = sections.child(section("歌曲", songs.into_any_element()));
         }
 
@@ -2720,115 +2830,131 @@ impl Root {
         content.child(lines).into_any_element()
     }
 
-    fn queue_drawer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut list = div()
-            .id("queue-scroll")
+    fn queue_row(&self, index: usize, song: &Song, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = self.queue.current_index() == Some(index);
+        let drag = QueueDrag {
+            index,
+            title: song.title.clone(),
+            position: Point::default(),
+        };
+        div()
+            .id(format!("queue-{index}"))
+            .h(px(QUEUE_ROW_HEIGHT))
+            .w_full()
             .flex()
             .flex_col()
             .gap_1()
+            .px_2()
+            .py_2()
+            .rounded_md()
+            .cursor_pointer()
+            .when(current, |row| row.bg(rgba(0xFFFFFF14)))
+            .hover(|style| style.bg(rgba(0xFFFFFF0A)))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(ui::muted_label(if current {
+                        "▶".to_owned()
+                    } else {
+                        format!("{}", index + 1)
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .truncate()
+                            .child(song.title.clone()),
+                    )
+                    .child(ui::muted_label(format_duration(song.duration))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(ui::muted_label(if current {
+                        "正在播放"
+                    } else {
+                        "拖动排序"
+                    }))
+                    .child(div().flex_1())
+                    .when(index > 0, |row| {
+                        row.child(ui::ghost_button(
+                            format!("queue-up-{index}"),
+                            "↑",
+                            false,
+                            cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.move_queue_song(index, index - 1, cx);
+                            }),
+                        ))
+                    })
+                    .when(index + 1 < self.queue.len(), |row| {
+                        row.child(ui::ghost_button(
+                            format!("queue-down-{index}"),
+                            "↓",
+                            false,
+                            cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.move_queue_song(index, index + 1, cx);
+                            }),
+                        ))
+                    })
+                    .child(ui::ghost_button(
+                        format!("queue-remove-{index}"),
+                        "移除",
+                        false,
+                        cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.remove_queue_song(index, cx);
+                        }),
+                    )),
+            )
+            .on_click(cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                this.select_queue_song(index, cx);
+            }))
+            .on_drag(drag, |info: &QueueDrag, position, _, cx| {
+                let mut preview = info.clone();
+                preview.position = position;
+                cx.new(|_| preview)
+            })
+            .on_drop(
+                cx.listener(move |this: &mut Root, info: &QueueDrag, _, cx| {
+                    this.move_queue_song(info.index, index, cx);
+                }),
+            )
+    }
+
+    fn queue_drawer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let list = if self.queue.is_empty() {
+            div()
+                .flex_1()
+                .child(placeholder("队列为空"))
+                .into_any_element()
+        } else {
+            uniform_list(
+                "queue-scroll",
+                self.queue.len(),
+                cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .filter_map(|index| {
+                            this.queue
+                                .songs()
+                                .get(index)
+                                .map(|song| this.queue_row(index, song, cx).into_any_element())
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll();
-        if self.queue.is_empty() {
-            list = list.child(placeholder("队列为空"));
-        }
-        for (index, song) in self.queue.songs().iter().enumerate() {
-            let current = self.queue.current_index() == Some(index);
-            let drag = QueueDrag {
-                index,
-                title: song.title.clone(),
-                position: Point::default(),
-            };
-            list = list.child(
-                div()
-                    .id(format!("queue-{index}"))
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .px_2()
-                    .py_2()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .when(current, |row| row.bg(rgba(0xFFFFFF14)))
-                    .hover(|style| style.bg(rgba(0xFFFFFF0A)))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(ui::muted_label(if current {
-                                "▶".to_owned()
-                            } else {
-                                format!("{}", index + 1)
-                            }))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_xs()
-                                    .truncate()
-                                    .child(song.title.clone()),
-                            )
-                            .child(ui::muted_label(format_duration(song.duration))),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(ui::muted_label(if current {
-                                "正在播放"
-                            } else {
-                                "拖动排序"
-                            }))
-                            .child(div().flex_1())
-                            .when(index > 0, |row| {
-                                row.child(ui::ghost_button(
-                                    format!("queue-up-{index}"),
-                                    "↑",
-                                    false,
-                                    cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
-                                        cx.stop_propagation();
-                                        this.move_queue_song(index, index - 1, cx);
-                                    }),
-                                ))
-                            })
-                            .when(index + 1 < self.queue.len(), |row| {
-                                row.child(ui::ghost_button(
-                                    format!("queue-down-{index}"),
-                                    "↓",
-                                    false,
-                                    cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
-                                        cx.stop_propagation();
-                                        this.move_queue_song(index, index + 1, cx);
-                                    }),
-                                ))
-                            })
-                            .child(ui::ghost_button(
-                                format!("queue-remove-{index}"),
-                                "移除",
-                                false,
-                                cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    this.remove_queue_song(index, cx);
-                                }),
-                            )),
-                    )
-                    .on_click(cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
-                        this.select_queue_song(index, cx);
-                    }))
-                    .on_drag(drag, |info: &QueueDrag, position, _, cx| {
-                        let mut preview = info.clone();
-                        preview.position = position;
-                        cx.new(|_| preview)
-                    })
-                    .on_drop(
-                        cx.listener(move |this: &mut Root, info: &QueueDrag, _, cx| {
-                            this.move_queue_song(info.index, index, cx);
-                        }),
-                    ),
-            );
-        }
+            .w_full()
+            .track_scroll(&self.queue_scroll)
+            .into_any_element()
+        };
         div()
             .flex()
             .flex_col()
@@ -2844,13 +2970,32 @@ impl Root {
             .child(
                 div()
                     .flex()
+                    .flex_shrink_0()
                     .items_center()
                     .justify_between()
                     .child(
                         div()
                             .text_sm()
                             .child(format!("播放队列 · {} 首", self.queue.len())),
-                    )
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .flex_shrink_0()
+                    .child(ui::ghost_button(
+                        "queue-locate-current",
+                        "定位当前",
+                        false,
+                        cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                            if let Some(index) = this.queue.current_index() {
+                                this.queue_scroll
+                                    .scroll_to_item(index, ScrollStrategy::Nearest);
+                                cx.notify();
+                            }
+                        }),
+                    ))
                     .child(ui::ghost_button(
                         "queue-clear-upcoming",
                         "清空待播",
@@ -3092,7 +3237,7 @@ fn section(title: &'static str, content: AnyElement) -> impl IntoElement {
 fn song_row(
     index: usize,
     song: &Song,
-    songs: Arc<Vec<Song>>,
+    source: SongSource,
     cx: &mut Context<Root>,
 ) -> impl IntoElement {
     let next_song = song.clone();
@@ -3114,7 +3259,8 @@ fn song_row(
                 .gap_3()
                 .child(
                     div()
-                        .w(px(28.))
+                        .w(px(48.))
+                        .flex_shrink_0()
                         .text_xs()
                         .text_color(rgb(theme::TEXT_FAINT))
                         .child(format!("{}", song.track.unwrap_or(index as u32 + 1))),
@@ -3164,7 +3310,7 @@ fn song_row(
         )
         .on_click(
             cx.listener(move |this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
-                this.play_songs((*songs).clone(), index, cx);
+                this.play_source(source, index, cx);
             }),
         )
 }

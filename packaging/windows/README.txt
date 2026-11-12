@@ -1,4 +1,4 @@
-Melos 0.1.4 — development preview
+Melos 0.1.5 — development preview
 
 Extract this folder and run melos.exe on Windows 10 (1903+)/11 (x64).
 For terminal playback, first save a connection in the desktop app, then
@@ -17,6 +17,8 @@ automatic resume require a server that supports byte ranges.
 
 Playback bar: shuffle, repeat off/all/one, Lyrics and Queue.
 Queue entries support next-play insertion, append, removal and reordering.
+Song lists and queues render visible rows; use Locate current in the queue
+to return to the active track in a long list.
 Playlists support browse/play/create/append/remove/rename/confirmed delete.
 Lyrics support timed highlighting, following, line seeking and plain text.
 Windows system media controls receive the current song's cached cover image.

@@ -42,7 +42,13 @@ fn wait(engine: &Engine, position: u64, timeout: Duration) -> Result<(), &'stati
     Err("progress_timeout")
 }
 
-fn playback(client: &Client, song: &Song, quality: StreamQuality, timeout: Duration) -> Value {
+fn playback(
+    client: &Client,
+    song: &Song,
+    quality: StreamQuality,
+    timeout: Duration,
+    play_seconds: u64,
+) -> Value {
     let suffix = song.suffix.as_deref().unwrap_or("unknown");
     let Ok(engine) = Engine::new() else {
         return json!({"suffix":suffix,"passed":false,"stage":"audio_device"});
@@ -78,20 +84,42 @@ fn playback(client: &Client, song: &Song, quality: StreamQuality, timeout: Durat
         Err("startup_failed")
     };
     let resumed = seek_result.is_ok();
+    let seek_elapsed_ms = seek_start.elapsed().as_millis();
+    let baseline = engine.snapshot();
+    let continuous_start = Instant::now();
+    let target_ms = baseline
+        .position_ms
+        .saturating_add(play_seconds * 1000)
+        .min(u64::from(song.duration.unwrap_or(u32::MAX)).saturating_mul(1000));
+    let continuous = if resumed && play_seconds > 0 {
+        wait(
+            &engine,
+            target_ms,
+            Duration::from_secs(play_seconds) + timeout,
+        )
+    } else if play_seconds == 0 {
+        Ok(())
+    } else {
+        Err("seek_failed")
+    };
     let snapshot = engine.snapshot();
+    let streaming_underruns = snapshot.underruns.saturating_sub(baseline.underruns);
     engine.stop();
     json!({
         "suffix":suffix,"requested_quality":format!("{quality:?}"),
         "started":started,"time_to_250ms_played_ms":startup_ms,"pause_frozen":frozen,
         "startup_failure_stage":startup.err(),"seek_failure_stage":seek_result.err(),
-        "seek_to_250ms_played_ms":seek_start.elapsed().as_millis(),"wait_timeout_ms":timeout.as_millis(),
+        "seek_to_250ms_played_ms":seek_elapsed_ms,"wait_timeout_ms":timeout.as_millis(),
+        "continuous_requested_seconds":play_seconds,"continuous_elapsed_ms":continuous_start.elapsed().as_millis(),
+        "continuous_played_ms":snapshot.position_ms.saturating_sub(baseline.position_ms),
+        "continuous_failure_stage":continuous.err(),"streaming_underruns":streaming_underruns,
         "seek_requested_ms":seek_ms,"playback_after_seek":resumed,
         "last_position_ms":snapshot.position_ms,"underruns_including_startup":snapshot.underruns,
-        "passed":started && frozen && resumed
+        "passed":started && frozen && resumed && continuous.is_ok() && streaming_underruns == 0
     })
 }
 
-async fn check(albums: u32, timeout: Duration) -> Result<Value, &'static str> {
+async fn check(albums: u32, timeout: Duration, play_seconds: u64) -> Result<Value, &'static str> {
     let settings = Settings::load();
     let password = settings.password().ok_or("saved_password_unavailable")?;
     let client = Client::new(
@@ -123,8 +151,39 @@ async fn check(albums: u32, timeout: Duration) -> Result<Value, &'static str> {
         }
     }
     let mut results = Vec::new();
+    let mut covers = Vec::new();
     for song in samples.values() {
-        results.push(playback(&client, song, StreamQuality::Original, timeout));
+        let id = song
+            .cover_art
+            .as_deref()
+            .or(song.album_id.as_deref())
+            .unwrap_or(&song.id);
+        let cover = client.cover_art(id, Some(256)).await;
+        let (size, format) = cover
+            .as_ref()
+            .map(|bytes| {
+                let format = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                    Some("png")
+                } else if bytes.starts_with(b"\xff\xd8\xff") {
+                    Some("jpeg")
+                } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+                    Some("webp")
+                } else if bytes.starts_with(b"GIF8") {
+                    Some("gif")
+                } else {
+                    None
+                };
+                (bytes.len(), format)
+            })
+            .unwrap_or((0, None));
+        covers.push(json!({"suffix":song.suffix,"bytes":size,"format":format,"passed":format.is_some(),"failure_stage":cover.err().map(|_| "cover_request_failed")}));
+        results.push(playback(
+            &client,
+            song,
+            StreamQuality::Original,
+            timeout,
+            play_seconds,
+        ));
     }
     if let Some(song) = samples.values().next() {
         results.push(playback(
@@ -132,20 +191,22 @@ async fn check(albums: u32, timeout: Duration) -> Result<Value, &'static str> {
             song,
             StreamQuality::Transcode { max_bit_rate: 192 },
             timeout,
+            play_seconds,
         ));
     }
     Ok(json!({
         "scope":"Short silent real-server playback/pause/seek checks; not full tracks, desktop UI or two-hour acceptance",
         "read_only":true,"silent":true,"server_type":info.server_type,"server_version":info.server_version,
         "albums_checked":list.len(),"formats_found":samples.keys().collect::<Vec<_>>(),
-        "passed":!results.is_empty() && results.iter().all(|result| result["passed"] == true),
-        "checks":results,"missing_formats_remain_unverified":true
+        "passed":!results.is_empty() && results.iter().all(|result| result["passed"] == true) && covers.iter().all(|cover| cover["passed"] == true),
+        "checks":results,"cover_checks":covers,"missing_formats_remain_unverified":true
     }))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut albums = 30;
     let mut timeout = Duration::from_secs(20);
+    let mut play_seconds = 0;
     let mut report = PathBuf::from("output/server-check.json");
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -166,9 +227,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .clamp(5, 90),
                 );
             }
+            "--play-seconds" => {
+                play_seconds = args
+                    .next()
+                    .ok_or("Missing playback duration")?
+                    .parse::<u64>()?
+                    .min(300);
+            }
             "--help" => {
                 println!(
-                    "server_check [--albums 30] [--timeout-seconds 20] [--report output/server-check.json]\nUses saved connection. Silent read-only sample playback/pause/seek; no scrobbling or saved-setting changes."
+                    "server_check [--albums 30] [--timeout-seconds 20] [--play-seconds 30] [--report output/server-check.json]\nUses saved connection. Silent read-only sample playback/pause/seek and cover checks; no scrobbling or saved-setting changes."
                 );
                 return Ok(());
             }
@@ -178,7 +246,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(check(albums, timeout));
+        .block_on(check(albums, timeout, play_seconds));
     let result = result.unwrap_or_else(
         |stage| json!({"passed":false,"stage":stage,"read_only":true,"silent":true}),
     );
