@@ -1,9 +1,8 @@
 //! Threaded playback engine: decode thread -> bounded queue -> cpal callback.
 //!
-//! The queue is a `Mutex<VecDeque<f32>>` that the audio callback only ever
-//! `try_lock`s; if the producer holds it, the callback emits silence for that
-//! period instead of blocking the device. This keeps the real-time path safe
-//! without an unsafe lock-free ring in the first iteration.
+//! Atomic PCM slots separate producer writes from callback reads. A gate
+//! excludes callbacks only during seek and queue edits; decoding never holds
+//! a lock needed by the real-time callback.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -14,15 +13,13 @@ use std::time::Duration;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig};
 
+use crate::buffer::PcmQueue;
 use crate::decoder::Decoder;
 use crate::error::PlayerError;
 use crate::source;
 
 /// How long the engine keeps decoded audio ahead of playback.
 const QUEUE_SECONDS: usize = 3;
-// Retry only a fixed number of times for a short producer critical section.
-// Never wait for an unscheduled producer or take a blocking callback lock.
-const CALLBACK_QUEUE_TRIES: usize = 64;
 
 #[derive(Clone, Debug)]
 pub struct StreamSpec {
@@ -75,7 +72,7 @@ struct DecodeToken {
 }
 
 struct Shared {
-    queue: Mutex<VecDeque<f32>>,
+    queue: PcmQueue,
     desired: Mutex<Desired>,
     wake: Condvar,
     boundaries: Mutex<VecDeque<Boundary>>,
@@ -100,9 +97,9 @@ struct Shared {
 impl Shared {
     fn new(rate: u32, channels: u16) -> Self {
         Self {
-            queue: Mutex::new(VecDeque::with_capacity(
+            queue: PcmQueue::new(
                 rate.max(1) as usize * usize::from(channels.max(1)) * QUEUE_SECONDS,
-            )),
+            ),
             desired: Mutex::new(Desired {
                 generation: 0,
                 current: None,
@@ -228,7 +225,7 @@ impl Engine {
     ) {
         let mut desired = self.shared.desired.lock().expect("desired lock");
         let mut boundaries = self.shared.boundaries.lock().expect("boundaries lock");
-        let mut queue = self.shared.queue.lock().expect("queue lock");
+        let mut queue = self.shared.queue.edit();
         desired.generation = desired.generation.wrapping_add(1);
         self.shared
             .generation
@@ -270,7 +267,7 @@ impl Engine {
         update_position(&self.shared);
         let mut desired = self.shared.desired.lock().expect("desired lock");
         let mut boundaries = self.shared.boundaries.lock().expect("boundaries lock");
-        let mut queue = self.shared.queue.lock().expect("queue lock");
+        let mut queue = self.shared.queue.edit();
         advance_boundaries(&self.shared, &mut boundaries);
         let Some(current) = boundaries
             .front()
@@ -363,7 +360,7 @@ impl Engine {
                 .lock()
                 .expect("boundaries lock")
                 .clear();
-            self.shared.queue.lock().expect("queue lock").clear();
+            self.shared.queue.edit().clear();
         }
         self.shared.position_ms.store(0, Ordering::Relaxed);
         self.shared.ended.store(false, Ordering::Relaxed);
@@ -475,17 +472,9 @@ where
         data.fill(T::from_sample(0.0));
         return;
     }
-    let mut lock = shared.queue.try_lock();
-    for _ in 1..CALLBACK_QUEUE_TRIES {
-        if lock.is_ok() {
-            break;
-        }
-        std::hint::spin_loop();
-        lock = shared.queue.try_lock();
-    }
-    let mut queue = match lock {
-        Ok(queue) => queue,
-        Err(_) => {
+    let mut queue = match shared.queue.try_consumer() {
+        Some(queue) => queue,
+        None => {
             if shared.playing.load(Ordering::Relaxed)
                 && !shared.decoder_done.load(Ordering::Relaxed)
             {
@@ -522,10 +511,10 @@ where
         }
     }
 
-    if starved && !shared.decoder_done.load(Ordering::Relaxed) {
+    if starved && !shared.decoder_done.load(Ordering::Acquire) {
         shared.underruns.fetch_add(1, Ordering::Relaxed);
     }
-    if queue.is_empty() && shared.decoder_done.load(Ordering::Relaxed) {
+    if shared.decoder_done.load(Ordering::Acquire) && queue.is_empty() {
         shared.ended.store(true, Ordering::Relaxed);
     }
 
@@ -546,7 +535,7 @@ fn replace_upcoming(shared: &Shared, upcoming: Vec<StreamSpec>, cycle: Vec<Strea
     update_position(shared);
     let mut desired = shared.desired.lock().expect("desired lock");
     let mut boundaries = shared.boundaries.lock().expect("boundaries lock");
-    let mut queue = shared.queue.lock().expect("queue lock");
+    let mut queue = shared.queue.edit();
     desired.upcoming = upcoming.into();
     desired.cycle = cycle;
     advance_boundaries(shared, &mut boundaries);
@@ -667,7 +656,7 @@ fn decode_playlist(shared: &Arc<Shared>, token: DecodeToken, task: DecodeTask) {
 
     let _desired = shared.desired.lock().expect("desired lock");
     if is_current(shared, token) {
-        shared.decoder_done.store(true, Ordering::Relaxed);
+        shared.decoder_done.store(true, Ordering::Release);
     }
 }
 
@@ -800,28 +789,27 @@ fn push_samples(shared: &Shared, token: DecodeToken, samples: &[f32]) -> bool {
         return true;
     }
 
-    let capacity = shared.rate() as usize * shared.channels() * QUEUE_SECONDS;
-
-    loop {
-        if !is_current(shared, token) {
-            return false;
-        }
-
-        match shared.queue.lock() {
-            Ok(mut queue) => {
+    // Large decoder packets must also respect the fixed three-second budget.
+    // Keep each publication frame-aligned for the callback's frame counter.
+    let capacity = shared.queue.capacity();
+    for chunk in samples.chunks(capacity) {
+        loop {
+            if !is_current(shared, token) {
+                return false;
+            }
+            {
+                let mut queue = shared.queue.producer();
                 if !is_current(shared, token) {
                     return false;
                 }
-                if queue.len() + samples.len() <= capacity || queue.is_empty() {
-                    queue.extend(samples.iter().copied());
-                    return true;
+                if queue.push(chunk) {
+                    break;
                 }
             }
-            Err(_) => return false,
+            thread::sleep(Duration::from_millis(5));
         }
-
-        thread::sleep(Duration::from_millis(5));
     }
+    true
 }
 
 fn monitor_loop(shared: Arc<Shared>) {
@@ -1129,10 +1117,8 @@ mod tests {
             },
         );
         let mut samples = Vec::new();
-        while !shared.decoder_done.load(Ordering::Relaxed)
-            || !shared.queue.lock().unwrap().is_empty()
-        {
-            let len = shared.queue.lock().unwrap().len().min(4096);
+        while !shared.decoder_done.load(Ordering::Relaxed) || shared.queue.producer().len() != 0 {
+            let len = shared.queue.producer().len().min(4096);
             if len == 0 {
                 thread::yield_now();
                 continue;
@@ -1183,7 +1169,7 @@ mod tests {
         let mut initial = vec![0.0f32; 44_100];
         fill(&mut initial, &engine.shared, 2);
         assert_eq!(engine.snapshot().position_ms, 500);
-        let queued = engine.shared.queue.lock().unwrap().len();
+        let queued = engine.shared.queue.producer().len();
         engine
             .shared
             .set_output_error(PlayerError::Stream("device disconnected".into()));
@@ -1195,7 +1181,7 @@ mod tests {
         let mut silent = vec![1.0f32; 1024];
         fill(&mut silent, &engine.shared, 2);
         assert!(silent.iter().all(|sample| *sample == 0.0));
-        assert_eq!(engine.shared.queue.lock().unwrap().len(), queued);
+        assert_eq!(engine.shared.queue.producer().len(), queued);
         assert_eq!(engine.snapshot().position_ms, 500);
         engine.play_queue(spec("mp3"), vec![]);
         assert!(
@@ -1205,9 +1191,9 @@ mod tests {
     }
 
     #[test]
-    fn callback_returns_silence_without_waiting_for_a_busy_producer() {
+    fn callback_returns_silence_without_waiting_for_a_queue_edit() {
         let engine = prepared_engine(&["wav"]);
-        let queue = engine.shared.queue.lock().unwrap();
+        let queue = engine.shared.queue.edit();
         let original_samples = queue.len();
         let shared = Arc::clone(&engine.shared);
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -1216,7 +1202,7 @@ mod tests {
             fill(&mut output, &shared, 2);
             sender.send(output).unwrap();
         });
-        // A slow producer must not block the device thread. It must also leave
+        // A slow queue edit must not block the device thread. It must leave
         // queued PCM intact so a later callback can recover without sample loss.
         let result = receiver.recv_timeout(Duration::from_millis(100));
         assert_eq!(queue.len(), original_samples);
@@ -1229,6 +1215,73 @@ mod tests {
                 .iter()
                 .any(|sample| sample.abs() > 0.01)
         );
+    }
+
+    #[test]
+    fn callback_plays_buffered_audio_while_producer_is_suspended() {
+        let engine = prepared_engine(&["wav"]);
+        let queue = engine.shared.queue.producer();
+        let original_samples = queue.len();
+        let shared = Arc::clone(&engine.shared);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let callback = thread::spawn(move || {
+            let mut output = [0.0f32; 1024];
+            fill(&mut output, &shared, 2);
+            sender.send(output).unwrap();
+        });
+        let result = receiver.recv_timeout(Duration::from_millis(100));
+        drop(queue);
+        callback.join().unwrap();
+        assert!(result.unwrap().iter().any(|sample| sample.abs() > 0.01));
+        assert_eq!(
+            engine.shared.queue.producer().len(),
+            original_samples - 1024
+        );
+        assert_eq!(engine.shared.consumed_frames.load(Ordering::Relaxed), 512);
+        assert_eq!(engine.snapshot().underruns, 0);
+    }
+
+    #[test]
+    fn oversized_decoder_packet_is_frame_aligned_and_bounded() {
+        let shared = Arc::new(Shared::new(4, 2));
+        shared.playing.store(true, Ordering::Relaxed);
+        let samples: Vec<_> = (0..100).map(|index| index as f32 / 100.0).collect();
+        let writer_shared = Arc::clone(&shared);
+        let writer_samples = samples.clone();
+        let writer = thread::spawn(move || {
+            assert!(push_samples(
+                &writer_shared,
+                DecodeToken {
+                    generation: 0,
+                    revision: 0
+                },
+                &writer_samples
+            ));
+            writer_shared.decoder_done.store(true, Ordering::Release);
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut actual = Vec::new();
+        while !shared.ended.load(Ordering::Relaxed) {
+            let len = shared.queue.producer().len();
+            assert!(len <= 24);
+            assert_eq!(len % 2, 0);
+            if len > 0 {
+                let mut output = vec![0.0f32; len];
+                fill(&mut output, &shared, 2);
+                actual.extend(output);
+            } else {
+                // Check completion without creating deliberate starvation.
+                fill(&mut [] as &mut [f32], &shared, 2);
+                thread::yield_now();
+            }
+            assert!(std::time::Instant::now() < deadline);
+        }
+        writer.join().unwrap();
+        assert_eq!(
+            actual,
+            samples.iter().map(|value| value * 0.8).collect::<Vec<_>>()
+        );
+        assert_eq!(shared.consumed_frames.load(Ordering::Relaxed), 50);
     }
 
     #[test]
@@ -1302,26 +1355,14 @@ mod tests {
         let engine = prepared_engine(&["flac", "wav", "mp3"]);
         consume(&engine, 11_025);
         engine.pause();
-        let remaining: Vec<_> = engine
-            .shared
-            .queue
-            .lock()
-            .unwrap()
-            .iter()
-            .take(33_075 * 2)
-            .copied()
-            .collect();
+        let remaining: Vec<_> = engine.shared.queue.edit().iter().take(33_075 * 2).collect();
         engine.replace_upcoming(vec![spec("mp3")]);
         decode_pending(&engine);
         assert!(!engine.snapshot().playing);
-        let queue = engine.shared.queue.lock().unwrap();
+        let queue = engine.shared.queue.edit();
         assert_eq!(queue.len(), (33_075 + 44_100) * 2);
         assert_eq!(
-            queue
-                .iter()
-                .take(remaining.len())
-                .copied()
-                .collect::<Vec<_>>(),
+            queue.iter().take(remaining.len()).collect::<Vec<_>>(),
             remaining
         );
         drop(queue);
@@ -1342,15 +1383,7 @@ mod tests {
     fn clearing_prefetched_tracks_preserves_every_remaining_current_sample() {
         let engine = prepared_engine(&["flac", "mp3"]);
         consume(&engine, 22_050);
-        let remaining: Vec<_> = engine
-            .shared
-            .queue
-            .lock()
-            .unwrap()
-            .iter()
-            .take(22_050 * 2)
-            .copied()
-            .collect();
+        let remaining: Vec<_> = engine.shared.queue.edit().iter().take(22_050 * 2).collect();
         engine.replace_upcoming(vec![]);
         let output = consume(&engine, 22_050);
         assert!(
@@ -1446,7 +1479,7 @@ mod tests {
         drop(boundaries);
         engine.replace_upcoming(vec![]);
         engine.resume();
-        let frames = engine.shared.queue.lock().unwrap().len() / 2;
+        let frames = engine.shared.queue.producer().len() / 2;
         assert!(frames > 0 && frames < 44_100);
         consume(&engine, frames);
         assert_eq!(engine.snapshot().track_index, 1);
@@ -1463,7 +1496,7 @@ mod tests {
         let worker = thread::spawn(move || decode_loop(shared));
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
-            let available = engine.shared.queue.lock().unwrap().len() / 2;
+            let available = engine.shared.queue.producer().len() / 2;
             if available > 0 {
                 consume(&engine, available.min(2048));
             }
@@ -1476,8 +1509,7 @@ mod tests {
             }
         }
         assert!(engine.take_error().is_none());
-        // try_lock contention can emit silence, but must never consume or lose
-        // PCM. Count the actual device frames, excluding those silent calls.
+        // Count actual device frames; producer writes must not lose PCM.
         assert_eq!(
             engine.shared.consumed_frames.load(Ordering::Relaxed),
             44_100 * 4
@@ -1507,7 +1539,7 @@ mod tests {
             let worker = thread::spawn(move || decode_loop(shared));
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             while engine.shared.consumed_frames.load(Ordering::Relaxed) < 44_100 * 4 + 11_025 {
-                let available = engine.shared.queue.lock().unwrap().len() / 2;
+                let available = engine.shared.queue.producer().len() / 2;
                 if available > 0 {
                     consume(&engine, available.min(1024));
                 }
@@ -1526,7 +1558,7 @@ mod tests {
             assert_eq!(engine.shared.boundaries.lock().unwrap().len(), 1);
             engine.resume();
             while !engine.snapshot().ended {
-                let available = engine.shared.queue.lock().unwrap().len() / 2;
+                let available = engine.shared.queue.producer().len() / 2;
                 if available > 0 {
                     consume(&engine, available.min(1024));
                 }

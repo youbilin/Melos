@@ -1,4 +1,4 @@
-Melos 0.1.3 — development preview
+Melos 0.1.4 — development preview
 
 Extract this folder and run melos.exe on Windows 10 (1903+)/11 (x64).
 For terminal playback, first save a connection in the desktop app, then

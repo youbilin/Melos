@@ -8,21 +8,41 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-fn wait(engine: &Engine, position: u64) -> bool {
+fn wait(engine: &Engine, position: u64, timeout: Duration) -> Result<(), &'static str> {
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(20) {
-        if engine.take_error().is_some() || engine.snapshot().output_failed {
-            return false;
+    while start.elapsed() < timeout {
+        if let Some(error) = engine.take_error() {
+            // Never emit the underlying message: it may contain a signed URL.
+            return Err(
+                if error.contains("timed out") || error.contains("timeout") {
+                    "network_timeout"
+                } else if error.starts_with("decode error:") {
+                    "decode_error"
+                } else if error.starts_with("network error:") {
+                    "network_error"
+                } else if error.starts_with("io error:") {
+                    "io_error"
+                } else {
+                    "player_error"
+                },
+            );
         }
-        if engine.snapshot().position_ms >= position {
-            return true;
+        let snapshot = engine.snapshot();
+        if snapshot.output_failed {
+            return Err("output_failed");
+        }
+        if snapshot.position_ms >= position {
+            return Ok(());
+        }
+        if snapshot.ended {
+            return Err("playback_ended_before_target");
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    false
+    Err("progress_timeout")
 }
 
-fn playback(client: &Client, song: &Song, quality: StreamQuality) -> Value {
+fn playback(client: &Client, song: &Song, quality: StreamQuality, timeout: Duration) -> Value {
     let suffix = song.suffix.as_deref().unwrap_or("unknown");
     let Ok(engine) = Engine::new() else {
         return json!({"suffix":suffix,"passed":false,"stage":"audio_device"});
@@ -37,7 +57,8 @@ fn playback(client: &Client, song: &Song, quality: StreamQuality) -> Value {
         },
         None,
     );
-    let started = wait(&engine, 250);
+    let startup = wait(&engine, 250, timeout);
+    let started = startup.is_ok();
     let startup_ms = start.elapsed().as_millis();
     engine.pause();
     std::thread::sleep(Duration::from_millis(100));
@@ -47,26 +68,30 @@ fn playback(client: &Client, song: &Song, quality: StreamQuality) -> Value {
     let seek_ms = u64::from(song.duration.unwrap_or(2))
         .saturating_mul(500)
         .clamp(500, 5000);
-    let resumed = if started {
+    let seek_start = Instant::now();
+    let seek_result = if started {
         engine.seek(seek_ms);
         std::thread::sleep(Duration::from_millis(200));
         engine.resume();
-        wait(&engine, seek_ms + 250)
+        wait(&engine, seek_ms + 250, timeout)
     } else {
-        false
+        Err("startup_failed")
     };
+    let resumed = seek_result.is_ok();
     let snapshot = engine.snapshot();
     engine.stop();
     json!({
         "suffix":suffix,"requested_quality":format!("{quality:?}"),
         "started":started,"time_to_250ms_played_ms":startup_ms,"pause_frozen":frozen,
+        "startup_failure_stage":startup.err(),"seek_failure_stage":seek_result.err(),
+        "seek_to_250ms_played_ms":seek_start.elapsed().as_millis(),"wait_timeout_ms":timeout.as_millis(),
         "seek_requested_ms":seek_ms,"playback_after_seek":resumed,
         "last_position_ms":snapshot.position_ms,"underruns_including_startup":snapshot.underruns,
         "passed":started && frozen && resumed
     })
 }
 
-async fn check(albums: u32) -> Result<Value, &'static str> {
+async fn check(albums: u32, timeout: Duration) -> Result<Value, &'static str> {
     let settings = Settings::load();
     let password = settings.password().ok_or("saved_password_unavailable")?;
     let client = Client::new(
@@ -99,13 +124,14 @@ async fn check(albums: u32) -> Result<Value, &'static str> {
     }
     let mut results = Vec::new();
     for song in samples.values() {
-        results.push(playback(&client, song, StreamQuality::Original));
+        results.push(playback(&client, song, StreamQuality::Original, timeout));
     }
     if let Some(song) = samples.values().next() {
         results.push(playback(
             &client,
             song,
             StreamQuality::Transcode { max_bit_rate: 192 },
+            timeout,
         ));
     }
     Ok(json!({
@@ -119,6 +145,7 @@ async fn check(albums: u32) -> Result<Value, &'static str> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut albums = 30;
+    let mut timeout = Duration::from_secs(20);
     let mut report = PathBuf::from("output/server-check.json");
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -131,9 +158,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .clamp(1, 80)
             }
             "--report" => report = args.next().ok_or("Missing report path")?.into(),
+            "--timeout-seconds" => {
+                timeout = Duration::from_secs(
+                    args.next()
+                        .ok_or("Missing timeout")?
+                        .parse::<u64>()?
+                        .clamp(5, 90),
+                );
+            }
             "--help" => {
                 println!(
-                    "server_check [--albums 30] [--report output/server-check.json]\nUses saved connection. Silent read-only sample playback/pause/seek; no scrobbling or saved-setting changes."
+                    "server_check [--albums 30] [--timeout-seconds 20] [--report output/server-check.json]\nUses saved connection. Silent read-only sample playback/pause/seek; no scrobbling or saved-setting changes."
                 );
                 return Ok(());
             }
@@ -143,7 +178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(check(albums));
+        .block_on(check(albums, timeout));
     let result = result.unwrap_or_else(
         |stage| json!({"passed":false,"stage":stage,"read_only":true,"silent":true}),
     );

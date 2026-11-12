@@ -3,6 +3,7 @@
 //! Decoding uses symphonia, output uses cpal, and the HTTP source supports
 //! Range requests so seeking works against a Navidrome `format=raw` stream.
 
+mod buffer;
 pub mod decoder;
 pub mod engine;
 pub mod error;
