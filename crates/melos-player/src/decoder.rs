@@ -10,7 +10,7 @@ use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, Tr
 use symphonia::core::io::MediaSource;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::units::Time;
+use symphonia::core::units::{Time, TimeBase, Timestamp};
 
 use crate::error::PlayerError;
 
@@ -21,6 +21,8 @@ pub struct Decoder {
     sample_rate: u32,
     channels: u16,
     duration_ms: Option<u64>,
+    time_base: TimeBase,
+    seek_target: Option<Timestamp>,
     eof: bool,
 }
 
@@ -42,7 +44,7 @@ impl Decoder {
             )
             .map_err(|e| PlayerError::Open(e.to_string()))?;
 
-        let (track_id, sample_rate, channels, duration_ms, decoder) = {
+        let (track_id, sample_rate, channels, duration_ms, time_base, decoder) = {
             let track = format
                 .default_track(TrackType::Audio)
                 .ok_or_else(|| PlayerError::Open("no audio track".into()))?;
@@ -71,7 +73,17 @@ impl Decoder {
                 .make_audio_decoder(params, &AudioDecoderOptions::default())
                 .map_err(|e| PlayerError::Decode(format!("unsupported codec: {e}")))?;
 
-            (track.id, sample_rate, channels, duration_ms, decoder)
+            let time_base = track.time_base.unwrap_or_else(|| {
+                TimeBase::try_from_recip(sample_rate).expect("nonzero sample rate")
+            });
+            (
+                track.id,
+                sample_rate,
+                channels,
+                duration_ms,
+                time_base,
+                decoder,
+            )
         };
 
         Ok(Self {
@@ -81,6 +93,8 @@ impl Decoder {
             sample_rate,
             channels: channels.max(1),
             duration_ms,
+            time_base,
+            seek_target: None,
             eof: false,
         })
     }
@@ -119,6 +133,26 @@ impl Decoder {
                         Ok(buffer) => {
                             out.resize(buffer.samples_interleaved(), 0.0);
                             buffer.copy_to_slice_interleaved(out.as_mut_slice());
+                            if let Some(target) = self.seek_target {
+                                // Accurate demuxer seeks land at a packet before
+                                // the target. Decode preroll for codec state,
+                                // then discard only samples before the target.
+                                // Gapless delay was already trimmed by Symphonia.
+                                let start = packet.pts.saturating_add(packet.trim_start);
+                                let ticks = target.saturating_delta(start).get().max(0) as u64;
+                                let frames = (u128::from(ticks)
+                                    * u128::from(self.time_base.numer.get())
+                                    * u128::from(self.sample_rate))
+                                .div_ceil(u128::from(self.time_base.denom.get()));
+                                let skip = frames
+                                    .min((out.len() / usize::from(self.channels)) as u128)
+                                    as usize
+                                    * usize::from(self.channels);
+                                out.drain(..skip);
+                                if !out.is_empty() {
+                                    self.seek_target = None;
+                                }
+                            }
                             if !out.is_empty() {
                                 return Ok(true);
                             }
@@ -141,7 +175,8 @@ impl Decoder {
         let time = Time::try_from_secs_f64(seconds)
             .ok_or_else(|| PlayerError::Config("seek position out of range".into()))?;
 
-        self.format
+        let seeked = self
+            .format
             .seek(
                 SeekMode::Accurate,
                 SeekTo::Time {
@@ -152,6 +187,7 @@ impl Decoder {
             .map_err(|e| PlayerError::Decode(format!("seek: {e}")))?;
 
         self.decoder.reset();
+        self.seek_target = Some(seeked.required_ts);
         self.eof = false;
         Ok(())
     }

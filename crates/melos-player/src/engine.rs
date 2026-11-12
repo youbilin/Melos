@@ -20,6 +20,9 @@ use crate::source;
 
 /// How long the engine keeps decoded audio ahead of playback.
 const QUEUE_SECONDS: usize = 3;
+// Retry only a fixed number of times for a short producer critical section.
+// Never wait for an unscheduled producer or take a blocking callback lock.
+const CALLBACK_QUEUE_TRIES: usize = 64;
 
 #[derive(Clone, Debug)]
 pub struct StreamSpec {
@@ -37,6 +40,7 @@ pub struct EngineSnapshot {
     pub track_index: u64,
     pub underruns: u64,
     pub volume: f32,
+    pub output_failed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +80,7 @@ struct Shared {
     wake: Condvar,
     boundaries: Mutex<VecDeque<Boundary>>,
     error: Mutex<Option<String>>,
+    output_failed: AtomicBool,
     consumed_frames: AtomicU64,
     playing: AtomicBool,
     ended: AtomicBool,
@@ -95,7 +100,9 @@ struct Shared {
 impl Shared {
     fn new(rate: u32, channels: u16) -> Self {
         Self {
-            queue: Mutex::new(VecDeque::new()),
+            queue: Mutex::new(VecDeque::with_capacity(
+                rate.max(1) as usize * usize::from(channels.max(1)) * QUEUE_SECONDS,
+            )),
             desired: Mutex::new(Desired {
                 generation: 0,
                 current: None,
@@ -109,6 +116,7 @@ impl Shared {
             wake: Condvar::new(),
             boundaries: Mutex::new(VecDeque::new()),
             error: Mutex::new(None),
+            output_failed: AtomicBool::new(false),
             consumed_frames: AtomicU64::new(0),
             playing: AtomicBool::new(false),
             ended: AtomicBool::new(false),
@@ -129,6 +137,11 @@ impl Shared {
     fn set_error(&self, error: PlayerError) {
         *self.error.lock().expect("error lock") = Some(error.to_string());
         self.playing.store(false, Ordering::Relaxed);
+    }
+
+    fn set_output_error(&self, error: PlayerError) {
+        self.output_failed.store(true, Ordering::Release);
+        self.set_error(error);
     }
 
     fn rate(&self) -> u32 {
@@ -161,7 +174,7 @@ impl Engine {
 
         {
             let shared = Arc::clone(&shared);
-            thread::spawn(move || audio_loop(shared, config, sample_format));
+            thread::spawn(move || audio_loop(shared, device, config, sample_format));
         }
         {
             let shared = Arc::clone(&shared);
@@ -190,6 +203,29 @@ impl Engine {
         upcoming: Vec<StreamSpec>,
         cycle: Vec<StreamSpec>,
     ) {
+        self.start_playlist(current, upcoming, cycle, 0, true);
+    }
+
+    /// Restores the current track at a checkpoint on a freshly opened output.
+    /// It starts paused so reconnecting headphones never resumes unexpectedly.
+    pub fn restore_playlist(
+        &self,
+        current: StreamSpec,
+        upcoming: Vec<StreamSpec>,
+        cycle: Vec<StreamSpec>,
+        position_ms: u64,
+    ) {
+        self.start_playlist(current, upcoming, cycle, position_ms, false);
+    }
+
+    fn start_playlist(
+        &self,
+        current: StreamSpec,
+        upcoming: Vec<StreamSpec>,
+        cycle: Vec<StreamSpec>,
+        position_ms: u64,
+        playing: bool,
+    ) {
         let mut desired = self.shared.desired.lock().expect("desired lock");
         let mut boundaries = self.shared.boundaries.lock().expect("boundaries lock");
         let mut queue = self.shared.queue.lock().expect("queue lock");
@@ -202,12 +238,19 @@ impl Engine {
         boundaries.clear();
 
         self.shared.consumed_frames.store(0, Ordering::Relaxed);
-        self.shared.position_ms.store(0, Ordering::Relaxed);
-        self.shared.duration_ms.store(0, Ordering::Relaxed);
+        self.shared
+            .position_ms
+            .store(position_ms, Ordering::Relaxed);
+        self.shared
+            .duration_ms
+            .store(current.duration_ms.unwrap_or(0), Ordering::Relaxed);
         self.shared.track_index.store(0, Ordering::Relaxed);
         self.shared.ended.store(false, Ordering::Relaxed);
         self.shared.decoder_done.store(false, Ordering::Relaxed);
-        self.shared.playing.store(true, Ordering::Relaxed);
+        self.shared.playing.store(
+            playing && !self.shared.output_failed.load(Ordering::Acquire),
+            Ordering::Relaxed,
+        );
 
         desired.current = Some(current);
         desired.upcoming = upcoming.into();
@@ -215,7 +258,7 @@ impl Engine {
         desired.resume = None;
         desired.decoding_start = 0;
         desired.decoding_spec = None;
-        desired.seek = None;
+        desired.seek = (position_ms > 0).then_some(position_ms);
         drop(queue);
         drop(boundaries);
         drop(desired);
@@ -296,7 +339,10 @@ impl Engine {
     }
 
     pub fn resume(&self) {
-        self.shared.playing.store(true, Ordering::Relaxed);
+        self.shared.playing.store(
+            !self.shared.output_failed.load(Ordering::Acquire),
+            Ordering::Relaxed,
+        );
     }
 
     pub fn stop(&self) {
@@ -339,11 +385,12 @@ impl Engine {
         EngineSnapshot {
             position_ms: self.shared.position_ms.load(Ordering::Relaxed),
             duration_ms: self.shared.duration_ms.load(Ordering::Relaxed),
-            playing: self.shared.playing.load(Ordering::Relaxed),
+            playing: self.is_playing(),
             ended: self.shared.ended.load(Ordering::Relaxed),
             track_index: self.shared.track_index.load(Ordering::Relaxed),
             underruns: self.shared.underruns.load(Ordering::Relaxed),
             volume: self.volume(),
+            output_failed: self.shared.output_failed.load(Ordering::Acquire),
         }
     }
 
@@ -357,6 +404,7 @@ impl Engine {
 
     pub fn is_playing(&self) -> bool {
         self.shared.playing.load(Ordering::Relaxed)
+            && !self.shared.output_failed.load(Ordering::Acquire)
     }
 }
 
@@ -367,20 +415,19 @@ impl Drop for Engine {
     }
 }
 
-fn audio_loop(shared: Arc<Shared>, config: StreamConfig, sample_format: SampleFormat) {
-    let host = cpal::default_host();
-    let Some(device) = host.default_output_device() else {
-        shared.set_error(PlayerError::NoDevice);
-        return;
-    };
-
+fn audio_loop(
+    shared: Arc<Shared>,
+    device: cpal::Device,
+    config: StreamConfig,
+    sample_format: SampleFormat,
+) {
     match sample_format {
         SampleFormat::F32 => build::<f32>(&device, &config, &shared),
         SampleFormat::I16 => build::<i16>(&device, &config, &shared),
         SampleFormat::I32 => build::<i32>(&device, &config, &shared),
         SampleFormat::U16 => build::<u16>(&device, &config, &shared),
         SampleFormat::F64 => build::<f64>(&device, &config, &shared),
-        other => shared.set_error(PlayerError::Config(format!(
+        other => shared.set_output_error(PlayerError::Config(format!(
             "unsupported device sample format: {other}"
         ))),
     }
@@ -392,28 +439,30 @@ where
 {
     let channels = config.channels as usize;
     let shared_cb = Arc::clone(shared);
+    let shared_error = Arc::clone(shared);
 
     let stream = device.build_output_stream(
         *config,
         move |data: &mut [T], _| fill(data, &shared_cb, channels),
-        |error| eprintln!("melos: audio stream error: {error}"),
+        move |error| shared_error.set_output_error(PlayerError::Stream(error.to_string())),
         None,
     );
 
     let stream = match stream {
         Ok(stream) => stream,
         Err(error) => {
-            shared.set_error(PlayerError::Stream(error.to_string()));
+            shared.set_output_error(PlayerError::Stream(error.to_string()));
             return;
         }
     };
 
     if let Err(error) = stream.play() {
-        shared.set_error(PlayerError::Stream(error.to_string()));
+        shared.set_output_error(PlayerError::Stream(error.to_string()));
         return;
     }
 
-    while !shared.shutdown.load(Ordering::Relaxed) {
+    while !shared.shutdown.load(Ordering::Relaxed) && !shared.output_failed.load(Ordering::Acquire)
+    {
         thread::sleep(Duration::from_millis(50));
     }
 }
@@ -422,7 +471,19 @@ fn fill<T>(data: &mut [T], shared: &Shared, channels: usize)
 where
     T: SizedSample + FromSample<f32>,
 {
-    let mut queue = match shared.queue.try_lock() {
+    if !shared.playing.load(Ordering::Relaxed) || shared.output_failed.load(Ordering::Acquire) {
+        data.fill(T::from_sample(0.0));
+        return;
+    }
+    let mut lock = shared.queue.try_lock();
+    for _ in 1..CALLBACK_QUEUE_TRIES {
+        if lock.is_ok() {
+            break;
+        }
+        std::hint::spin_loop();
+        lock = shared.queue.try_lock();
+    }
+    let mut queue = match lock {
         Ok(queue) => queue,
         Err(_) => {
             if shared.playing.load(Ordering::Relaxed)
@@ -437,7 +498,7 @@ where
         }
     };
 
-    if !shared.playing.load(Ordering::Relaxed) {
+    if !shared.playing.load(Ordering::Relaxed) || shared.output_failed.load(Ordering::Acquire) {
         for sample in data.iter_mut() {
             *sample = T::from_sample(0.0);
         }
@@ -805,19 +866,16 @@ fn update_position(shared: &Shared) {
                 .store(current.duration_ms, Ordering::Relaxed);
         }
     }
-
-    if let Ok(queue) = shared.queue.lock()
-        && queue.is_empty()
-        && shared.decoder_done.load(Ordering::Relaxed)
-        && shared.playing.load(Ordering::Relaxed)
-    {
-        shared.ended.store(true, Ordering::Relaxed);
-    }
+    // Only the output callback decides when playback has drained. Position
+    // polling must not hold the PCM queue lock and cause silent callbacks.
 }
 
 #[derive(Default)]
 struct LinearResampler {
-    position: f64,
+    // Source position in units of 1 / target_rate of a source frame. Integer
+    // phase avoids adding a device frame at exact track boundaries through
+    // cumulative floating-point rounding.
+    position: u64,
 }
 
 /// Converts interleaved channels to the device channel count.
@@ -883,12 +941,12 @@ fn resample_linear(
         return;
     }
 
-    let ratio = f64::from(source_rate) / f64::from(target_rate);
+    let limit = frames as u64 * u64::from(target_rate);
     let mut position = state.position;
 
-    while position < frames as f64 {
-        let index = position.floor() as usize;
-        let fraction = (position - index as f64) as f32;
+    while position < limit {
+        let index = (position / u64::from(target_rate)) as usize;
+        let fraction = (position % u64::from(target_rate)) as f32 / target_rate as f32;
         let next = (index + 1).min(frames - 1);
 
         for channel in 0..channels {
@@ -897,10 +955,10 @@ fn resample_linear(
             out.push(a + (b - a) * fraction);
         }
 
-        position += ratio;
+        position += u64::from(source_rate);
     }
 
-    state.position = position - frames as f64;
+    state.position = position - limit;
 }
 
 #[cfg(test)]
@@ -941,6 +999,23 @@ mod tests {
         let mut out = Vec::new();
         resample_linear(&input, 48_000, 48_000, 2, &mut state, &mut out);
         assert_eq!(out, input);
+    }
+
+    #[test]
+    fn chunked_resampling_has_exact_duration_across_track_boundaries() {
+        for target_rate in [32_000, 48_000, 96_000] {
+            for total in [22_050usize, 44_100, 88_200] {
+                let mut state = LinearResampler::default();
+                let mut out = Vec::new();
+                let mut produced = 0;
+                for chunk in vec![0.0; total].chunks(1152) {
+                    resample_linear(chunk, 44_100, target_rate, 1, &mut state, &mut out);
+                    produced += out.len();
+                }
+                assert_eq!(produced, total * target_rate as usize / 44_100);
+                assert_eq!(state.position, 0);
+            }
+        }
     }
 
     #[test]
@@ -988,19 +1063,39 @@ mod tests {
     }
 
     #[test]
-    fn decoder_seeks_in_bundled_flac_fixture() {
-        let path = fixture("flac");
-        let hint = std::path::Path::new(&path)
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .map(str::to_owned);
-        let source = crate::source::open_file(std::path::Path::new(&path)).unwrap();
-        let mut decoder = Decoder::open(source, hint.as_deref()).unwrap();
-
-        decoder.seek_ms(500).unwrap();
-        let mut chunk = Vec::new();
-        assert!(decoder.next_chunk(&mut chunk).unwrap());
-        assert!(!chunk.is_empty());
+    fn decoder_seeks_discard_preroll_and_keep_the_exact_remaining_audio() {
+        for extension in ["wav", "flac", "mp3"] {
+            let path = fixture(extension);
+            let source = crate::source::open_file(std::path::Path::new(&path)).unwrap();
+            let mut decoder = Decoder::open(source, Some(extension)).unwrap();
+            let mut original = Vec::new();
+            let mut chunk = Vec::new();
+            while decoder.next_chunk(&mut chunk).unwrap() {
+                original.extend_from_slice(&chunk);
+            }
+            for position in [123, 500, 901, 0] {
+                // The engine opens a fresh decoder for each seek generation.
+                let source = crate::source::open_file(std::path::Path::new(&path)).unwrap();
+                let mut decoder = Decoder::open(source, Some(extension)).unwrap();
+                decoder.seek_ms(position).unwrap();
+                let mut remaining = Vec::new();
+                while decoder
+                    .next_chunk(&mut chunk)
+                    .unwrap_or_else(|error| panic!("{extension} at {position}: {error}"))
+                {
+                    remaining.extend_from_slice(&chunk);
+                }
+                let skip = (position * 44_100 / 1000) as usize * decoder.channels() as usize;
+                assert_eq!(
+                    remaining.len(),
+                    original.len() - skip,
+                    "{extension} at {position}"
+                );
+                if extension != "mp3" {
+                    assert_eq!(remaining, original[skip..], "{extension} at {position}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -1080,6 +1175,92 @@ mod tests {
         );
         decode_selected(&engine);
         engine
+    }
+
+    #[test]
+    fn output_failure_freezes_audio_and_requires_a_new_output() {
+        let engine = prepared_engine(&["wav", "flac"]);
+        let mut initial = vec![0.0f32; 44_100];
+        fill(&mut initial, &engine.shared, 2);
+        assert_eq!(engine.snapshot().position_ms, 500);
+        let queued = engine.shared.queue.lock().unwrap().len();
+        engine
+            .shared
+            .set_output_error(PlayerError::Stream("device disconnected".into()));
+        let snapshot = engine.snapshot();
+        assert!(snapshot.output_failed);
+        assert!(!snapshot.playing);
+        assert!(engine.take_error().unwrap().contains("device disconnected"));
+        engine.resume();
+        let mut silent = vec![1.0f32; 1024];
+        fill(&mut silent, &engine.shared, 2);
+        assert!(silent.iter().all(|sample| *sample == 0.0));
+        assert_eq!(engine.shared.queue.lock().unwrap().len(), queued);
+        assert_eq!(engine.snapshot().position_ms, 500);
+        engine.play_queue(spec("mp3"), vec![]);
+        assert!(
+            !engine.snapshot().playing,
+            "a dead output must not report playback after a new request"
+        );
+    }
+
+    #[test]
+    fn callback_returns_silence_without_waiting_for_a_busy_producer() {
+        let engine = prepared_engine(&["wav"]);
+        let queue = engine.shared.queue.lock().unwrap();
+        let original_samples = queue.len();
+        let shared = Arc::clone(&engine.shared);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let callback = thread::spawn(move || {
+            let mut output = [1.0f32; 1024];
+            fill(&mut output, &shared, 2);
+            sender.send(output).unwrap();
+        });
+        // A slow producer must not block the device thread. It must also leave
+        // queued PCM intact so a later callback can recover without sample loss.
+        let result = receiver.recv_timeout(Duration::from_millis(100));
+        assert_eq!(queue.len(), original_samples);
+        drop(queue);
+        callback.join().unwrap();
+        assert!(result.unwrap().iter().all(|sample| *sample == 0.0));
+        assert_eq!(engine.snapshot().position_ms, 0);
+        assert!(
+            consume(&engine, 512)
+                .iter()
+                .any(|sample| sample.abs() > 0.01)
+        );
+    }
+
+    #[test]
+    fn restoring_on_a_different_output_format_keeps_checkpoint_and_upcoming() {
+        let restored = Engine {
+            shared: Arc::new(Shared::new(48_000, 1)),
+        };
+        restored.restore_playlist(spec("wav"), vec![spec("flac")], vec![], 500);
+        decode_selected(&restored);
+        assert_eq!(
+            restored.shared.boundaries.lock().unwrap()[1].start_frame,
+            24_000,
+            "restored half-second must have exactly 24,000 device frames"
+        );
+        assert!(!restored.snapshot().playing);
+        assert_eq!(restored.snapshot().position_ms, 500);
+        let mut paused = [1.0f32; 1000];
+        fill(&mut paused, &restored.shared, 1);
+        assert!(paused.iter().all(|sample| *sample == 0.0));
+        assert_eq!(restored.snapshot().position_ms, 500);
+        restored.resume();
+        let mut remainder = vec![0.0f32; 24_000];
+        fill(&mut remainder, &restored.shared, 1);
+        let snapshot = restored.snapshot();
+        assert_eq!(snapshot.track_index, 1);
+        assert_eq!(snapshot.position_ms, 0);
+        let mut next = vec![0.0f32; 48_000];
+        fill(&mut next, &restored.shared, 1);
+        let snapshot = restored.snapshot();
+        assert!(snapshot.ended);
+        assert_eq!(snapshot.position_ms, 1000);
+        assert_eq!(snapshot.underruns, 0);
     }
 
     fn decode_selected(engine: &Engine) {

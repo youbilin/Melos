@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "Melos terminal player\nUsage: melos-tui [--help|--version]\nUses desktop connection settings; MELOS_CONFIG_DIR selects another configuration.\n1 albums · 2 playlists · 3 queue · 4 lyrics · / search · Enter open/play\nSpace pause · n/p next/previous · Left/Right seek · +/- volume · s shuffle · r repeat\na append song · i play next · d remove queue entry · J/K reorder · D clear upcoming\nL load more albums · t switch lyrics · Esc cancel/back · q or Ctrl+C quit"
+            "Melos terminal player\nUsage: melos-tui [--help|--version]\nUses desktop connection settings; MELOS_CONFIG_DIR selects another configuration.\n1 albums · 2 playlists · 3 queue · 4 lyrics · / search · Enter open/play\nSpace pause · n/p next/previous · Left/Right seek · +/- volume · s shuffle · r repeat\na append song · i play next · d remove queue entry · J/K reorder · D clear upcoming\nL load more albums · t switch lyrics · e reconnect audio (paused) · Esc cancel/back · q or Ctrl+C quit"
         );
         return Ok(());
     }
@@ -363,6 +363,43 @@ impl App {
                 .unwrap_or(0),
         }
     }
+    fn reconnect_output(&mut self) {
+        if let Some(engine) = self.engine.as_ref() {
+            engine.pause();
+        }
+        self.sync();
+        let position = self.snapshot.position_ms;
+        let engine = match Engine::new() {
+            Ok(engine) => engine,
+            Err(error) => {
+                self.status = format!("Audio output unavailable: {error}");
+                return;
+            }
+        };
+        engine.set_volume(self.settings.volume);
+        if self.started
+            && let Some(song) = self.queue.current()
+        {
+            engine.restore_playlist(
+                self.spec(song),
+                self.queue
+                    .playback_upcoming()
+                    .iter()
+                    .map(|song| self.spec(song))
+                    .collect(),
+                self.queue
+                    .playback_cycle()
+                    .iter()
+                    .map(|song| self.spec(song))
+                    .collect(),
+                position,
+            );
+        }
+        self.engine = Some(engine);
+        self.boundary = 0;
+        self.status = "Audio reconnected · Space to resume".into();
+        self.sync();
+    }
     fn key(&mut self, key: KeyEvent) -> bool {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return true;
@@ -399,6 +436,7 @@ impl App {
         .unwrap_or(0);
         match key.code {
             KeyCode::Char('q') => return true,
+            KeyCode::Char('e') => self.reconnect_output(),
             KeyCode::Char('/') => self.query = Some(String::new()),
             KeyCode::Char('1') | KeyCode::Esc => self.page(Page::Albums),
             KeyCode::Char('2') => self.page(Page::Playlists),
@@ -573,7 +611,7 @@ impl App {
             Constraint::Length(3),
             Constraint::Min(1),
             Constraint::Length(3),
-            Constraint::Length(3),
+            Constraint::Length(4),
         ])
         .areas(frame.area());
         frame.render_widget(
@@ -723,7 +761,7 @@ impl App {
             .map(|query| format!("Search: {query} · Enter submit · Esc cancel"))
             .unwrap_or_else(|| {
                 format!(
-                    "Space pause · n/p skip · ←/→ seek · +/- volume · s/r modes · q quit | {}",
+                    "{}\nSpace pause · n/p skip · ←/→ seek · +/- volume · e audio · q quit",
                     self.status
                 )
             });

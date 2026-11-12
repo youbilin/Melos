@@ -72,6 +72,7 @@ cmd /c '"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxilia
 - [x] 歌词：同步高亮与跟随滚动、点击跳转、多版本切换、纯文本/LRC 与旧接口回退
 - [x] 设置与持久化：音质、音量、连接信息、DPAPI 密码保护与密码掩码
 - [x] 仓库自带音频测试素材，多格式解码、seek、gapless 与断流恢复回归测试
+- [x] 音频输出错误反馈与手动重连；保留当前歌曲、待播队列和进度，重连后保持暂停
 - [x] M6 首版：release 优化、应用图标/版本信息、Windows 绿色版 ZIP 与校验和
 - [x] GitHub Actions：格式、测试、Clippy、底层依赖检查、Windows 构建与私有构建产物
 - [ ] 发布验收：真实媒体键、两小时连续播放、完整应用性能目标
@@ -87,13 +88,17 @@ Opus、WMA、APE、DSD 等无法本地解码的格式显式请求服务端转为
 ./packaging/build-windows.ps1
 ```
 
-产物在 `output/release/`，包含 ZIP 和 SHA256。程序要求 Windows 10 1903+ / Windows 11（x64）以及 Microsoft Visual C++ 2015–2022 Redistributable（x64）。当前 0.1.1 版本为开发预览，包含桌面与终端程序，以及队列编辑、随机/循环、分页曲库、歌单与歌词。
+产物在 `output/release/`，包含 ZIP 和 SHA256。程序要求 Windows 10 1903+ / Windows 11（x64）以及 Microsoft Visual C++ 2015–2022 Redistributable（x64）。当前 0.1.2 版本为开发预览，包含桌面与终端程序，以及队列编辑、随机/循环、分页曲库、歌单、歌词与音频输出重连。
+
+音频设备断开后，在桌面设置页点“重新连接音频输出”，或在终端按 `e`。重新打开默认设备并保留歌曲、队列和播放位置；确认设备后按播放继续。
 
 ```powershell
 # 无人值守的窗口初始化、SMTC 与空闲内存粗测
 ./packaging/measure-windows.ps1
 # 显式运行 30 秒断流恢复验收
 cmd /c '"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && cargo test -p melos-player stream_recovers_after_thirty_seconds_offline -- --ignored'
+# 静音的本地素材/默认设备长测，记录进度漂移、内存、队列与重连检查
+cmd /c '"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && cargo run -p melos-player --example soak --release --locked -- --seconds 7200 --report output/playback-soak.json'
 ```
 
 项目保持私有；完成并验证的改动按批次提交、推送，见 [项目工作约定](AGENTS.md)。

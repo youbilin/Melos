@@ -734,6 +734,25 @@ impl Root {
                     .into_any_element(),
             ))
             .child(section(
+                "音频输出",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(ui::muted_label(
+                        "设备断开后可重新连接；保留歌曲、队列和进度，恢复后保持暂停。",
+                    ))
+                    .child(ui::ghost_button(
+                        "reconnect-output",
+                        "重新连接音频输出",
+                        false,
+                        cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                            this.reconnect_output(cx)
+                        }),
+                    ))
+                    .into_any_element(),
+            ))
+            .child(section(
                 "音量",
                 div()
                     .flex()
@@ -801,6 +820,45 @@ impl Root {
     }
 
     // ---------------------------------------------------------------- playback
+
+    fn reconnect_output(&mut self, cx: &mut Context<Self>) {
+        if let Some(engine) = self.engine.as_ref() {
+            engine.pause();
+        }
+        self.sync_engine(cx);
+        let position = self.position_ms;
+        let engine = match Engine::new() {
+            Ok(engine) => engine,
+            Err(error) => {
+                self.error = Some(format!("音频输出连接失败：{error}"));
+                cx.notify();
+                return;
+            }
+        };
+        engine.set_volume(self.volume);
+        if let (Some(client), Some(song)) = (self.client.as_ref(), self.queue.current()) {
+            let quality = self.stream_quality(cx);
+            engine.restore_playlist(
+                stream_spec(client, song, quality),
+                self.queue
+                    .playback_upcoming()
+                    .iter()
+                    .map(|song| stream_spec(client, song, quality))
+                    .collect(),
+                self.queue
+                    .playback_cycle()
+                    .iter()
+                    .map(|song| stream_spec(client, song, quality))
+                    .collect(),
+                position,
+            );
+        }
+        self.engine = Some(engine);
+        self.last_track_index = 0;
+        self.playing = false;
+        self.error = None;
+        cx.notify();
+    }
 
     fn play_songs(&mut self, songs: Vec<Song>, start: usize, cx: &mut Context<Self>) {
         if songs.is_empty() {
@@ -1238,6 +1296,10 @@ impl Root {
         };
         let snapshot = engine.snapshot();
         let mut changed = false;
+        if let Some(error) = engine.take_error() {
+            self.error = Some(format!("播放失败：{error}"));
+            changed = true;
+        }
 
         if !self
             .slider_drag
