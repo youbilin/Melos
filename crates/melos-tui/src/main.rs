@@ -262,6 +262,7 @@ impl App {
                             }
                         }
                     }
+                    melos_core::library::sort_library_songs(&mut self.songs);
                     self.songs_offset = offset + received as u32;
                     self.songs_more = received == 200;
                     self.status = format!("{} songs loaded · L load more", self.songs.len());

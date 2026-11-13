@@ -143,6 +143,10 @@ pub struct Root {
     password: Entity<TextInput>,
     search: Entity<TextInput>,
     playlist_name: Entity<TextInput>,
+    new_server: Entity<TextInput>,
+    new_username: Entity<TextInput>,
+    new_password: Entity<TextInput>,
+    source_status: Option<String>,
 
     connected: bool,
     connecting: bool,
@@ -237,6 +241,9 @@ impl Root {
         });
         let search = cx.new(|cx| TextInput::new("搜索艺人、专辑或歌曲", cx));
         let playlist_name = cx.new(|cx| TextInput::new("歌单名称", cx));
+        let new_server = cx.new(|cx| TextInput::new("http://192.168.1.10:4533", cx));
+        let new_username = cx.new(|cx| TextInput::new("用户名", cx));
+        let new_password = cx.new(|cx| TextInput::with_secure("密码", true, cx));
         let mut queue = Queue::new();
         queue.set_repeat(settings.repeat);
         queue.set_shuffle(settings.shuffle);
@@ -259,6 +266,10 @@ impl Root {
             password,
             search,
             playlist_name,
+            new_server,
+            new_username,
+            new_password,
+            source_status: None,
             connected: false,
             connecting: false,
             error: None,
@@ -443,6 +454,18 @@ impl Root {
                 self.connecting = false;
                 self.error = None;
                 self.server_info = Some(*info);
+                // A successful login joins the saved source list instead of
+                // replacing the previous server.
+                let (server, username, password) = (
+                    self.server.read(cx).content().trim().to_owned(),
+                    self.username.read(cx).content().trim().to_owned(),
+                    self.password.read(cx).content().to_owned(),
+                );
+                if !password.is_empty() {
+                    let _ = self.settings.update(cx, |settings, _| {
+                        settings.adopt_connection(&server, &username, &password)
+                    });
+                }
                 self.save_settings(cx);
                 self.password
                     .update(cx, |input, cx| input.set_content("", cx));
@@ -489,6 +512,7 @@ impl Root {
                         .into_iter()
                         .filter(|song| known.insert(song.id.clone())),
                 );
+                melos_core::library::sort_library_songs(&mut self.library_songs);
             }
             Response::Artists(artists) => self.artists = artists,
             Response::Album(album) => {
@@ -927,8 +951,6 @@ impl Root {
 
     fn settings_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = self.settings.read(cx);
-        let server = settings.server.clone();
-        let username = settings.username.clone();
         let quality = settings.max_bit_rate;
         let mut choices = div().flex().gap_2();
         for (label, bitrate) in [
@@ -950,64 +972,78 @@ impl Root {
             .flex()
             .flex_col()
             .gap_6()
-            .child(section(
-                "服务器",
+            .child(section("音乐源", {
+                let sources = self.settings.read(cx);
+                let active = sources.active_source();
+                let mut rows = div().flex().flex_col().gap_1();
+                for (index, source) in sources.sources().iter().enumerate() {
+                    let current = index == active;
+                    let label = format!("{} · {}", source.username, source.server);
+                    let mut row = div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().flex_1().min_w_0().text_sm().truncate().child(label))
+                        .when(current, |row| row.child(ui::muted_label("当前")));
+                    if !current {
+                        row = row
+                            .child(ui::ghost_button(
+                                format!("source-switch-{index}"),
+                                "切换",
+                                false,
+                                cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                                    this.switch_source(index, cx)
+                                }),
+                            ))
+                            .child(ui::ghost_button(
+                                format!("source-remove-{index}"),
+                                "删除",
+                                false,
+                                cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                                    this.remove_source(index, cx)
+                                }),
+                            ));
+                    }
+                    rows = rows.child(row);
+                }
                 div()
                     .flex()
                     .flex_col()
-                    .gap_2()
-                    .child(ui::muted_label(server))
-                    .child(ui::muted_label(username))
+                    .gap_3()
+                    .child(rows)
+                    .child(ui::muted_label(
+                        "添加只保存；点“切换”才会连接，当前播放会停止。",
+                    ))
+                    .child(field("服务器地址", &self.new_server))
+                    .child(field("用户名", &self.new_username))
+                    .child(field("密码", &self.new_password))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(ui::ghost_button(
+                                "add-source",
+                                "添加音乐源",
+                                false,
+                                cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                                    this.add_source(cx)
+                                }),
+                            ))
+                            .child(ui::muted_label(
+                                self.source_status.clone().unwrap_or_default(),
+                            )),
+                    )
                     .child(ui::ghost_button(
                         "disconnect",
-                        "切换服务器",
+                        "断开当前连接",
                         false,
                         cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
-                            if let Some(engine) = this.engine.as_ref() {
-                                engine.stop();
-                            }
-                            this.playing = false;
-                            this.connected = false;
-                            this.client = None;
-                            this.queue.clear();
-                            this.now_playing = None;
-                            this.clear_lyrics();
-                            this.albums.clear();
-                            this.album_offset = 0;
-                            this.albums_loading = false;
-                            this.albums_more = true;
-                            this.artists.clear();
-                            this.covers.clear();
-                            this.visible_cover_ids.clear();
-                            this.failed_covers.clear();
-                            this.cover_requests.clear();
-                            this.priority_cover_requests.clear();
-                            this.playing_cover_ids.clear();
-                            this.pending_stars.clear();
-                            this.detail = None;
-                            this.artist_view = None;
-                            this.search_result = None;
-                            this.playlists.clear();
-                            this.playlist_detail = None;
-                            this.requested_playlist = None;
-                            this.playlists_loading = false;
-                            this.playlist_pending = false;
-                            this.playlist_editor = None;
-                            this.playlist_delete_confirm = false;
-                            this.api = ApiWorker::new();
-                            this.error = None;
-                            if let Some(saved) = this.settings.read(cx).password() {
-                                this.password
-                                    .update(cx, |input, cx| input.set_content(saved, cx));
-                            }
-                            if let Some(smtc) = this.smtc.as_ref() {
-                                smtc.set_status(None);
-                            }
-                            cx.notify();
+                            this.reset_connection(cx)
                         }),
                     ))
-                    .into_any_element(),
-            ))
+                    .into_any_element()
+            }))
             .child(section(
                 "播放音质",
                 div()
@@ -1083,6 +1119,125 @@ impl Root {
     }
 
     // ---------------------------------------------------------------- playback
+
+    /// Stops playback and drops everything tied to the current server.
+    fn reset_connection(&mut self, cx: &mut Context<Self>) {
+        if let Some(engine) = self.engine.as_ref() {
+            engine.stop();
+        }
+        self.playing = false;
+        self.connected = false;
+        self.client = None;
+        self.queue.clear();
+        self.now_playing = None;
+        self.clear_lyrics();
+        self.position_ms = 0;
+        self.duration_ms = 0;
+        self.last_track_index = 0;
+        self.random_pending = false;
+        self.random_request = self.random_request.wrapping_add(1);
+        self.albums.clear();
+        self.album_offset = 0;
+        self.albums_loading = false;
+        self.albums_more = true;
+        self.library_songs.clear();
+        self.library_offset = 0;
+        self.library_loading = false;
+        self.library_more = true;
+        self.artists.clear();
+        self.covers.clear();
+        self.visible_cover_ids.clear();
+        self.failed_covers.clear();
+        self.cover_requests.clear();
+        self.priority_cover_requests.clear();
+        self.playing_cover_ids.clear();
+        self.pending_stars.clear();
+        self.detail = None;
+        self.artist_view = None;
+        self.search_result = None;
+        self.playlists.clear();
+        self.playlist_detail = None;
+        self.requested_playlist = None;
+        self.playlists_loading = false;
+        self.playlist_pending = false;
+        self.playlist_editor = None;
+        self.playlist_delete_confirm = false;
+        self.api = ApiWorker::new();
+        self.error = None;
+        if let Some(saved) = self.settings.read(cx).password() {
+            self.password
+                .update(cx, |input, cx| input.set_content(saved, cx));
+        }
+        if let Some(smtc) = self.smtc.as_ref() {
+            smtc.set_status(None);
+        }
+        cx.notify();
+    }
+
+    fn add_source(&mut self, cx: &mut Context<Self>) {
+        let server = self.new_server.read(cx).content().trim().to_owned();
+        let username = self.new_username.read(cx).content().trim().to_owned();
+        let password = self.new_password.read(cx).content().to_owned();
+        if server.is_empty() || username.is_empty() || password.is_empty() {
+            self.source_status = Some("请填写服务器、用户名和密码".into());
+            cx.notify();
+            return;
+        }
+        let result = self.settings.update(cx, |settings, _| {
+            let index = settings.add_source(&server, &username, &password)?;
+            settings.save().map(|_| index)
+        });
+        match result {
+            Ok(_) => {
+                self.new_server
+                    .update(cx, |input, cx| input.set_content("", cx));
+                self.new_username
+                    .update(cx, |input, cx| input.set_content("", cx));
+                self.new_password
+                    .update(cx, |input, cx| input.set_content("", cx));
+                self.source_status = Some("已添加；点“切换”才会连接".into());
+            }
+            Err(error) => self.source_status = Some(format!("添加失败：{error}")),
+        }
+        cx.notify();
+    }
+
+    fn switch_source(&mut self, index: usize, cx: &mut Context<Self>) {
+        let switched = self.settings.update(cx, |settings, _| {
+            if !settings.switch_source(index) {
+                return false;
+            }
+            let _ = settings.save();
+            true
+        });
+        if !switched {
+            return;
+        }
+        self.reset_connection(cx);
+        let (server, username) = {
+            let settings = self.settings.read(cx);
+            (settings.server.clone(), settings.username.clone())
+        };
+        self.server
+            .update(cx, |input, cx| input.set_content(server, cx));
+        self.username
+            .update(cx, |input, cx| input.set_content(username, cx));
+        self.connect(cx);
+    }
+
+    fn remove_source(&mut self, index: usize, cx: &mut Context<Self>) {
+        let removed = self.settings.update(cx, |settings, _| {
+            if !settings.remove_source(index) {
+                return false;
+            }
+            let _ = settings.save();
+            true
+        });
+        if removed {
+            self.source_status = Some("已删除音乐源".into());
+        }
+        cx.notify();
+    }
 
     fn reconnect_output(&mut self, cx: &mut Context<Self>) {
         if let Some(engine) = self.engine.as_ref() {

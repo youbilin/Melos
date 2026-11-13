@@ -1,4 +1,4 @@
-Melos 0.1.10 — development preview
+Melos 0.1.11 — development preview
 
 Extract this folder and run melos.exe on Windows 10 (1903+)/11 (x64).
 For terminal playback, first save a connection in the desktop app, then
@@ -10,6 +10,8 @@ the desktop. Keys: 1 albums, 2 playlists, 3 queue, 4 lyrics, 5 all songs,
 Microsoft Visual C++ 2015-2022 Redistributable (x64) must be installed:
 https://aka.ms/vs/17/release/vc_redist.x64.exe
 Enter your Navidrome / OpenSubsonic server URL, username and password.
+Settings > Music sources keeps several saved servers: adding one does not
+switch, and switching stops playback before connecting to the new server.
 Settings are saved in %APPDATA%\melos\settings.json. The password is
 protected with Windows DPAPI and is tied to your Windows user account.
 
