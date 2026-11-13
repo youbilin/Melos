@@ -64,6 +64,92 @@ mod tests {
         assert!(decode_all(bytes).is_err());
     }
 
+    /// Delivers the whole file, then fails instead of returning a clean EOF,
+    /// like a server or transcoder that drops the connection after the last
+    /// frame.
+    struct DroppedTail {
+        data: Vec<u8>,
+        position: usize,
+        fail_at: usize,
+    }
+
+    impl Read for DroppedTail {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.position >= self.fail_at {
+                return Err(io::Error::other("request or response body error"));
+            }
+            let end = (self.position + buffer.len()).min(self.fail_at);
+            let count = end - self.position;
+            buffer[..count].copy_from_slice(&self.data[self.position..end]);
+            self.position = end;
+            Ok(count)
+        }
+    }
+
+    impl Seek for DroppedTail {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            let target = match position {
+                SeekFrom::Start(offset) => offset as i64,
+                SeekFrom::Current(offset) => self.position as i64 + offset,
+                SeekFrom::End(offset) => self.data.len() as i64 + offset,
+            };
+            self.position = target.max(0) as usize;
+            Ok(self.position as u64)
+        }
+    }
+
+    impl MediaSource for DroppedTail {
+        fn is_seekable(&self) -> bool {
+            true
+        }
+        fn byte_len(&self) -> Option<u64> {
+            Some(self.data.len() as u64)
+        }
+    }
+
+    #[test]
+    fn dropped_connection_after_the_last_frame_finishes_normally() {
+        let mut decoder = Decoder::open(
+            Box::new(DroppedTail {
+                data: FLAC.to_vec(),
+                position: 0,
+                fail_at: FLAC.len(),
+            }),
+            Some("flac"),
+        )
+        .unwrap();
+        let mut chunk = Vec::new();
+        let mut frames = 0;
+        while decoder.next_chunk(&mut chunk).unwrap() {
+            frames += chunk.len() / usize::from(decoder.channels());
+        }
+        // The failed read can take the final packet with it; losing one frame
+        // group at the tail is acceptable, stopping the queue is not.
+        assert!((41_000..=44_100).contains(&frames));
+    }
+
+    #[test]
+    fn dropped_connection_mid_track_remains_an_error() {
+        let cut = FLAC.len() / 2;
+        let mut decoder = Decoder::open(
+            Box::new(DroppedTail {
+                data: FLAC[..cut].to_vec(),
+                position: 0,
+                fail_at: cut,
+            }),
+            Some("flac"),
+        )
+        .unwrap();
+        let mut chunk = Vec::new();
+        loop {
+            match decoder.next_chunk(&mut chunk) {
+                Ok(true) => {}
+                Ok(false) => panic!("truncated track reported a clean end"),
+                Err(_) => break,
+            }
+        }
+    }
+
     #[test]
     fn transport_interruption_is_not_a_clean_audio_end() {
         let mut decoder = Decoder::open(Box::new(io::Cursor::new(FLAC)), Some("flac")).unwrap();
@@ -83,6 +169,10 @@ struct SourceEnd {
     clean: AtomicBool,
     interrupted: AtomicBool,
 }
+
+/// A connection that dies this close to the declared end still produced the
+/// whole track in practice; real truncation is far larger.
+const INTERRUPTED_END_TOLERANCE_MS: u64 = 1_000;
 
 struct ObservedSource {
     inner: Box<dyn MediaSource>,
@@ -289,6 +379,14 @@ impl Decoder {
                 {
                     self.eof = true;
                 }
+                // Servers and transcoders sometimes drop the connection right
+                // after the last frame. If nearly all declared audio was
+                // decoded, treat the failed tail read as the end of the track.
+                Err(SymphoniaError::IoError(_))
+                    if self.decoded_to_end(INTERRUPTED_END_TOLERANCE_MS) =>
+                {
+                    self.eof = true;
+                }
                 Err(error) => return Err(PlayerError::Decode(error.to_string())),
             }
         }
@@ -300,10 +398,18 @@ impl Decoder {
         // transport error or a substantially truncated track stays an error.
         self.source_end.clean.load(Ordering::Relaxed)
             && !self.source_end.interrupted.load(Ordering::Relaxed)
-            && self.decoded_end_ms > 0
-            && self
-                .duration_ms
-                .is_none_or(|duration| self.decoded_end_ms.saturating_add(100) >= duration)
+            && self.decoded_to_end(100)
+    }
+
+    fn decoded_to_end(&self, tolerance_ms: u64) -> bool {
+        let Some(duration) = self.duration_ms else {
+            return false;
+        };
+        // Require at least 90% of the declared audio so a track truncated in
+        // the middle cannot pass as a finished one.
+        self.decoded_end_ms > 0
+            && u128::from(self.decoded_end_ms) * 10 >= u128::from(duration) * 9
+            && self.decoded_end_ms.saturating_add(tolerance_ms) >= duration
     }
 
     pub fn seek_ms(&mut self, position_ms: u64) -> Result<(), PlayerError> {
