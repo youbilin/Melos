@@ -28,6 +28,10 @@ pub enum Request {
         size: u32,
         offset: u32,
     },
+    LibrarySongs {
+        size: u32,
+        offset: u32,
+    },
     Artists,
     Playlists,
     Playlist {
@@ -82,6 +86,11 @@ pub enum Response {
     Connected(Box<ServerInfo>),
     Albums {
         albums: Vec<Album>,
+        offset: u32,
+        size: u32,
+    },
+    LibrarySongs {
+        songs: Vec<melos_api::Song>,
         offset: u32,
         size: u32,
     },
@@ -338,6 +347,20 @@ async fn handle(client: &mut Option<Client>, request: Request) -> Response {
             match client.album_list(AlbumListType::Newest, size, offset).await {
                 Ok(albums) => Response::Albums {
                     albums,
+                    offset,
+                    size,
+                },
+                Err(error) => Response::Error(error.to_string()),
+            }
+        }
+
+        Request::LibrarySongs { size, offset } => {
+            let Some(client) = client.as_ref() else {
+                return Response::Error("尚未连接服务器".into());
+            };
+            match client.songs_page(size, offset).await {
+                Ok(songs) => Response::LibrarySongs {
+                    songs,
                     offset,
                     size,
                 },

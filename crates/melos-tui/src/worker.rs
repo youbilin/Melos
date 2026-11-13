@@ -6,6 +6,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 pub enum Job {
     Connect,
     Albums(u32),
+    Library(u32),
     Album(String),
     Playlists,
     Playlist(String),
@@ -24,6 +25,11 @@ pub enum Data {
     Songs {
         songs: Vec<Song>,
         title: String,
+    },
+    Library {
+        songs: Vec<Song>,
+        offset: u32,
+        received: usize,
     },
     Playlists(Vec<Playlist>),
     Lyrics(Vec<Lyrics>),
@@ -71,6 +77,15 @@ impl Worker {
                             let received = albums.len();
                             Data::Albums {
                                 albums,
+                                offset,
+                                received,
+                            }
+                        }
+                        Job::Library(offset) => {
+                            let songs = client.songs_page(200, offset).await?;
+                            let received = songs.len();
+                            Data::Library {
+                                songs,
                                 offset,
                                 received,
                             }

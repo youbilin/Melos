@@ -21,6 +21,7 @@ pub enum Icon {
     Artist,
     Album,
     Playlist,
+    Songs,
     Search,
     Lyrics,
     Settings,
@@ -369,6 +370,26 @@ fn paint_icon(icon: Icon, bounds: Bounds<Pixels>, color: Rgba, window: &mut Wind
             for y in [0.24, 0.50, 0.76] {
                 stroke(&[at(0.14, y), at(0.86, y)], color, window);
             }
+        }
+        Icon::Songs => {
+            stroke(
+                &[at(0.40, 0.80), at(0.40, 0.16), at(0.84, 0.10)],
+                color,
+                window,
+            );
+            stroke(
+                &[
+                    at(0.30, 0.64),
+                    at(0.46, 0.64),
+                    at(0.50, 0.74),
+                    at(0.46, 0.84),
+                    at(0.30, 0.84),
+                    at(0.26, 0.74),
+                    at(0.30, 0.64),
+                ],
+                color,
+                window,
+            );
         }
         Icon::Search => {
             stroke(

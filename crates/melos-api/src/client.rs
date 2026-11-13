@@ -294,6 +294,31 @@ impl Client {
         }
     }
 
+    /// `search3` with an empty query pages through the whole song library.
+    pub async fn songs_page(&self, size: u32, offset: u32) -> Result<Vec<Song>, Error> {
+        let mut payload = self
+            .get(
+                "search3",
+                &[
+                    ("query", String::new()),
+                    ("songCount", size.min(500).to_string()),
+                    ("songOffset", offset.to_string()),
+                    ("albumCount", "0".to_owned()),
+                    ("artistCount", "0".to_owned()),
+                ],
+            )
+            .await?;
+
+        match payload.remove("searchResult3") {
+            Some(value) => {
+                let result: SearchResult = serde_json::from_value(value)
+                    .map_err(|e| Error::Decode(format!("searchResult3: {e}")))?;
+                Ok(result.song)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// `getPlaylists`
     pub async fn playlists(&self) -> Result<Vec<Playlist>, Error> {
         let mut payload = self.get("getPlaylists", &[]).await?;
@@ -663,6 +688,18 @@ mod tests {
         assert_eq!(album.album.artist.as_deref(), Some("Artist"));
         assert_eq!(album.song.len(), 1);
         assert_eq!(album.song[0].suffix.as_deref(), Some("flac"));
+    }
+
+    #[tokio::test]
+    async fn songs_page_parses_the_library_results() {
+        let server = serve_once(
+            r#"{"subsonic-response":{"status":"ok","version":"1.16.1","searchResult3":{"song":[{"id":"s1","title":"One"},{"id":"s2","title":"Two"}]}}}"#,
+        )
+        .await;
+
+        let songs = client(&server).songs_page(200, 40).await.unwrap();
+        assert_eq!(songs.len(), 2);
+        assert_eq!(songs[0].title, "One");
     }
 
     #[tokio::test]

@@ -1,10 +1,12 @@
-Melos 0.1.9 — development preview
+Melos 0.1.10 — development preview
 
 Extract this folder and run melos.exe on Windows 10 (1903+)/11 (x64).
 For terminal playback, first save a connection in the desktop app, then
 run melos-tui.exe in PowerShell or Windows Terminal. Use --help for keys.
-The terminal preview supports album/playlist browsing, song search,
-queue editing, playback modes and lyrics; playlist editing uses the desktop.
+The terminal preview supports album/playlist/full-library browsing, song
+search, queue editing, playback modes and lyrics; playlist editing uses
+the desktop. Keys: 1 albums, 2 playlists, 3 queue, 4 lyrics, 5 all songs,
+/ search, Esc back, Enter open/play, Space pause, n/p skip, L load more.
 Microsoft Visual C++ 2015-2022 Redistributable (x64) must be installed:
 https://aka.ms/vs/17/release/vc_redist.x64.exe
 Enter your Navidrome / OpenSubsonic server URL, username and password.
@@ -15,6 +17,7 @@ Supported local decoders: WAV, FLAC, MP3, AAC/ALAC and Vorbis.
 Other formats request server-side MP3 transcoding. Range seeking and
 automatic resume require a server that supports byte ranges.
 
+The Songs page lists the whole library in pages of 200.
 The sidebar can collapse to icons. Playback modes use shuffle and repeat icons.
 Shuffle draws random songs from the whole library and keeps going after the
 queue ends. Queue entries support next-play insertion, append, removal and

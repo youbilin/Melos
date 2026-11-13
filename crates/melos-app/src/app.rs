@@ -30,6 +30,7 @@ const CONTENT_PADDING: f32 = 64.0;
 const CARD_MIN: f32 = 160.0;
 const CARD_GAP: f32 = 24.0;
 const ALBUM_PAGE_SIZE: u32 = 80;
+const LIBRARY_PAGE_SIZE: u32 = 200;
 const RANDOM_BATCH: u32 = 100;
 const SONG_ROW_HEIGHT: f32 = 76.0;
 const QUEUE_ROW_HEIGHT: f32 = 76.0;
@@ -37,6 +38,7 @@ const QUEUE_ROW_HEIGHT: f32 = 76.0;
 #[derive(Clone, Copy)]
 enum SongSource {
     Album,
+    Library,
     Playlist,
     Search,
 }
@@ -88,6 +90,7 @@ pub enum View {
     Home,
     Artists,
     Albums,
+    Songs,
     Playlists,
     Search,
     Lyrics,
@@ -100,6 +103,7 @@ impl View {
             Self::Home => "首页",
             Self::Artists => "艺人",
             Self::Albums => "专辑",
+            Self::Songs => "歌曲",
             Self::Playlists => "歌单",
             Self::Search => "搜索",
             Self::Lyrics => "歌词",
@@ -112,6 +116,7 @@ impl View {
             Self::Home => ui::Icon::Home,
             Self::Artists => ui::Icon::Artist,
             Self::Albums => ui::Icon::Album,
+            Self::Songs => ui::Icon::Songs,
             Self::Playlists => ui::Icon::Playlist,
             Self::Search => ui::Icon::Search,
             Self::Lyrics => ui::Icon::Lyrics,
@@ -148,6 +153,10 @@ pub struct Root {
     album_offset: u32,
     albums_loading: bool,
     albums_more: bool,
+    library_songs: Vec<Song>,
+    library_offset: u32,
+    library_loading: bool,
+    library_more: bool,
     artists: Vec<Artist>,
     detail: Option<AlbumWithSongs>,
     artist_view: Option<ArtistWithAlbums>,
@@ -258,6 +267,10 @@ impl Root {
             album_offset: 0,
             albums_loading: false,
             albums_more: true,
+            library_songs: Vec::new(),
+            library_offset: 0,
+            library_loading: false,
+            library_more: true,
             artists: Vec::new(),
             detail: None,
             artist_view: None,
@@ -455,6 +468,28 @@ impl Root {
                         .filter(|album| known.insert(album.id.clone())),
                 );
             }
+            Response::LibrarySongs {
+                songs,
+                offset,
+                size,
+            } => {
+                if offset != self.library_offset {
+                    return;
+                }
+                self.library_loading = false;
+                self.library_more = songs.len() == size as usize;
+                self.library_offset += songs.len() as u32;
+                let mut known: HashSet<_> = self
+                    .library_songs
+                    .iter()
+                    .map(|song| song.id.clone())
+                    .collect();
+                self.library_songs.extend(
+                    songs
+                        .into_iter()
+                        .filter(|song| known.insert(song.id.clone())),
+                );
+            }
             Response::Artists(artists) => self.artists = artists,
             Response::Album(album) => {
                 if let Some(id) = album.album.cover_art.as_deref() {
@@ -608,6 +643,18 @@ impl Root {
                 size: 240,
             });
         }
+    }
+
+    fn load_more_library_songs(&mut self, cx: &mut Context<Self>) {
+        if self.library_loading || !self.library_more || !self.connected {
+            return;
+        }
+        self.library_loading = true;
+        self.api.send(Request::LibrarySongs {
+            size: LIBRARY_PAGE_SIZE,
+            offset: self.library_offset,
+        });
+        cx.notify();
     }
 
     fn load_more_albums(&mut self, cx: &mut Context<Self>) {
@@ -1662,6 +1709,9 @@ impl Root {
             self.playlists_loading = true;
             self.api.send_priority(Request::Playlists);
         }
+        if view == View::Songs && self.library_songs.is_empty() {
+            self.load_more_library_songs(cx);
+        }
         cx.notify();
     }
 
@@ -1790,6 +1840,7 @@ impl Root {
             View::Home,
             View::Artists,
             View::Albums,
+            View::Songs,
             View::Playlists,
             View::Search,
         ] {
@@ -1894,6 +1945,18 @@ impl Root {
         if self.view == View::Lyrics {
             return self.lyrics_view(window, cx);
         }
+        if self.view == View::Songs {
+            return div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .px_8()
+                .pb_8()
+                .child(self.songs_view(cx))
+                .into_any_element();
+        }
         if let Some(detail) = &self.detail {
             return div()
                 .flex()
@@ -1936,6 +1999,7 @@ impl Root {
                     }
                 }
                 View::Artists => self.artists_view(cx),
+                View::Songs => unreachable!("songs view handled above"),
                 View::Playlists => self.playlists_view(cx).into_any_element(),
                 View::Search => self.search_view(window, cx).into_any_element(),
                 View::Settings => self.settings_view(cx).into_any_element(),
@@ -2367,6 +2431,7 @@ impl Root {
     fn source_songs(&self, source: SongSource) -> &[Song] {
         match source {
             SongSource::Album => self.detail.as_ref().map(|album| album.song.as_slice()),
+            SongSource::Library => Some(self.library_songs.as_slice()),
             SongSource::Playlist => self
                 .playlist_detail
                 .as_ref()
@@ -2407,6 +2472,7 @@ impl Root {
                     .map(|playlist| playlist.playlist.id.as_str())
                     .unwrap_or_default()
             ),
+            SongSource::Library => "library-songs".to_owned(),
             SongSource::Search => format!("search-songs-{}", self.search_results_generation),
         };
         let count = self.source_songs(source).len();
@@ -2875,6 +2941,55 @@ impl Root {
                     cx.notify();
                 }),
             ))
+    }
+
+    fn songs_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let count = self.library_songs.len();
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(div().text_2xl().child("全部歌曲"))
+                    .child(ui::muted_label(if count == 0 {
+                        "暂无歌曲".to_owned()
+                    } else {
+                        format!("{count} 首")
+                    }))
+                    .child(div().flex_1())
+                    .child(ui::primary_button(
+                        "播放全部",
+                        count > 0,
+                        cx.listener(|this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
+                            let songs = this.library_songs.clone();
+                            if !songs.is_empty() {
+                                this.play_songs(songs, 0, cx);
+                            }
+                        }),
+                    ))
+                    .when(self.library_more, |row| {
+                        row.child(ui::ghost_button(
+                            "library-more",
+                            if self.library_loading {
+                                "加载中…"
+                            } else {
+                                "加载更多"
+                            },
+                            false,
+                            cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                                this.load_more_library_songs(cx);
+                            }),
+                        ))
+                    }),
+            )
+            .child(self.song_list(SongSource::Library, cx))
+            .into_any_element()
     }
 
     fn lyrics_view(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {

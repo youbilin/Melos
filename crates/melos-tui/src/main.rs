@@ -13,7 +13,7 @@ use std::io::{self, IsTerminal};
 use std::time::Duration;
 use worker::{Data, Job, Worker};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
     Albums,
     Songs,
@@ -33,11 +33,15 @@ struct App {
     boundary: u64,
     started: bool,
     page: Page,
+    history: Vec<Page>,
     albums: Vec<Album>,
     offset: u32,
     more: bool,
     playlists: Vec<Playlist>,
     songs: Vec<Song>,
+    songs_library: bool,
+    songs_offset: u32,
+    songs_more: bool,
     title: String,
     selection: ListState,
     query: Option<String>,
@@ -56,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "Melos terminal player\nUsage: melos-tui [--help|--version]\nUses desktop connection settings; MELOS_CONFIG_DIR selects another configuration.\n1 albums · 2 playlists · 3 queue · 4 lyrics · / search · Enter open/play\nSpace pause · n/p next/previous · Left/Right seek · +/- volume · s shuffle · r repeat\na append song · i play next · d remove queue entry · J/K reorder · D clear upcoming\nL load more albums · t switch lyrics · e reconnect audio (paused) · Esc cancel/back · q or Ctrl+C quit"
+            "Melos terminal player\nUsage: melos-tui [--help|--version]\nUses desktop connection settings; MELOS_CONFIG_DIR selects another configuration.\n1 albums · 2 playlists · 3 queue · 4 lyrics · 5 all songs · / search · Enter open/play\nSpace pause · n/p next/previous · Left/Right seek · +/- volume · s shuffle · r repeat\na append song · i play next · d remove queue entry · J/K reorder · D clear upcoming\nL load more albums · t switch lyrics · e reconnect audio (paused) · Esc cancel/back · q or Ctrl+C quit"
         );
         return Ok(());
     }
@@ -136,10 +140,14 @@ impl App {
             boundary: 0,
             started: false,
             page: Page::Albums,
+            history: Vec::new(),
             albums: Vec::new(),
             offset: 0,
             more: true,
             playlists: Vec::new(),
+            songs_library: false,
+            songs_offset: 0,
+            songs_more: false,
             songs: Vec::new(),
             title: String::new(),
             selection: ListState::default().with_selected(Some(0)),
@@ -165,6 +173,12 @@ impl App {
         }
     }
     fn page(&mut self, page: Page) {
+        if self.page != page {
+            self.history.push(self.page);
+        }
+        self.show(page);
+    }
+    fn show(&mut self, page: Page) {
         self.page = page;
         self.selection.select(Some(0));
         self.browse_ticket = 0;
@@ -175,6 +189,24 @@ impl App {
         if page == Page::Albums && self.albums.is_empty() {
             self.request(Job::Albums(0));
         }
+    }
+    /// Esc goes one level up: playlist/album songs return to their list.
+    fn back(&mut self) {
+        let page = self.history.pop().unwrap_or(Page::Albums);
+        self.show(page);
+    }
+    /// Full library song list, paged with L.
+    fn library(&mut self) {
+        if self.page != Page::Songs {
+            self.history.push(self.page);
+        }
+        self.show(Page::Songs);
+        self.songs.clear();
+        self.songs_library = true;
+        self.songs_offset = 0;
+        self.songs_more = true;
+        self.title = "全部歌曲".into();
+        self.request(Job::Library(0));
     }
     fn tick(&mut self) {
         for response in self.worker.drain() {
@@ -213,9 +245,35 @@ impl App {
                     }
                     self.status = format!("{} albums loaded · L load more", self.albums.len());
                 }
+                Ok(Data::Library {
+                    songs,
+                    offset,
+                    received,
+                }) => {
+                    if !self.songs_library {
+                        continue;
+                    }
+                    if offset == 0 {
+                        self.songs = songs;
+                    } else {
+                        for song in songs {
+                            if !self.songs.iter().any(|item| item.id == song.id) {
+                                self.songs.push(song);
+                            }
+                        }
+                    }
+                    self.songs_offset = offset + received as u32;
+                    self.songs_more = received == 200;
+                    self.status = format!("{} songs loaded · L load more", self.songs.len());
+                }
                 Ok(Data::Songs { songs, title }) => {
                     self.songs = songs;
+                    self.songs_library = false;
+                    self.songs_more = false;
                     self.title = title;
+                    if self.page != Page::Songs {
+                        self.history.push(self.page);
+                    }
                     self.page = Page::Songs;
                     self.selection.select(Some(0));
                     self.status.clear();
@@ -438,10 +496,12 @@ impl App {
             KeyCode::Char('q') => return true,
             KeyCode::Char('e') => self.reconnect_output(),
             KeyCode::Char('/') => self.query = Some(String::new()),
-            KeyCode::Char('1') | KeyCode::Esc => self.page(Page::Albums),
+            KeyCode::Char('1') => self.page(Page::Albums),
+            KeyCode::Esc => self.back(),
             KeyCode::Char('2') => self.page(Page::Playlists),
             KeyCode::Char('3') => self.page(Page::Queue),
             KeyCode::Char('4') => self.page(Page::Lyrics),
+            KeyCode::Char('5') => self.library(),
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.page == Page::Lyrics {
                     self.lyrics_selection.select(Some(index.saturating_sub(1)));
@@ -456,6 +516,14 @@ impl App {
                 } else {
                     self.selection.select(Some(index));
                 }
+            }
+            KeyCode::Char('L')
+                if self.page == Page::Songs
+                    && self.songs_library
+                    && self.songs_more
+                    && self.status != "Loading…" =>
+            {
+                self.request(Job::Library(self.songs_offset));
             }
             KeyCode::Char('L')
                 if self.page == Page::Albums && self.more && self.status != "Loading…" =>
@@ -616,7 +684,7 @@ impl App {
         .areas(frame.area());
         frame.render_widget(
             Paragraph::new(format!(
-                "Melos {} · 1 Albums · 2 Playlists · 3 Queue · 4 Lyrics · / Search",
+                "Melos {} · 1 Albums · 2 Playlists · 3 Queue · 4 Lyrics · 5 Songs · / Search",
                 env!("CARGO_PKG_VERSION")
             ))
             .block(Block::bordered()),
@@ -637,7 +705,15 @@ impl App {
                     .collect(),
             ),
             Page::Songs => (
-                format!("{} · Enter play · a append · i play next", self.title),
+                if self.songs_library {
+                    format!(
+                        "{} · {} songs · Enter play · a append · i play next · L load more",
+                        self.title,
+                        self.songs.len()
+                    )
+                } else {
+                    format!("{} · Enter play · a append · i play next", self.title)
+                },
                 self.songs
                     .iter()
                     .map(|song| {
@@ -717,6 +793,18 @@ impl App {
                 (title, rows)
             }
         };
+        // Keep the active lyric line in the middle instead of only scrolling
+        // it into view; plain lyrics stay manually scrollable.
+        if self.page == Page::Lyrics
+            && self
+                .lyrics
+                .get(self.lyrics_track)
+                .is_some_and(|lyrics| lyrics.synced)
+            && let Some(index) = self.lyrics_selection.selected()
+        {
+            let height = body.height.saturating_sub(2) as usize;
+            *self.lyrics_selection.offset_mut() = index.saturating_sub(height / 2);
+        }
         frame.render_stateful_widget(
             List::new(rows)
                 .block(Block::bordered().title(title))
@@ -761,7 +849,7 @@ impl App {
             .map(|query| format!("Search: {query} · Enter submit · Esc cancel"))
             .unwrap_or_else(|| {
                 format!(
-                    "{}\nSpace pause · n/p skip · ←/→ seek · +/- volume · e audio · q quit",
+                    "{}\nSpace pause · n/p skip · ←/→ seek · +/- volume · e audio · Esc back · q quit",
                     self.status
                 )
             });
@@ -800,6 +888,16 @@ mod tests {
         assert!(!app.queue.shuffle());
         assert_eq!(app.queue.repeat(), RepeatMode::Off);
     }
+    #[test]
+    fn esc_returns_to_the_previous_page() {
+        let mut app = app();
+        app.page(Page::Playlists);
+        assert_eq!(app.page, Page::Playlists);
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.page, Page::Albums);
+        assert!(app.history.is_empty());
+    }
+
     #[test]
     fn empty_pages_and_small_terminals_are_safe() {
         let mut app = app();
