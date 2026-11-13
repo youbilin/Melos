@@ -41,5 +41,18 @@ try {
     Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $archive -Force
     $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText("$archive.sha256", "$hash  $([IO.Path]::GetFileName($archive))`n")
+
+    $tuiStage = Join-Path $repoRoot ('output/package-tui-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force $tuiStage | Out-Null
+    Copy-Item -LiteralPath $terminalBinary -Destination $tuiStage
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination $tuiStage
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'packaging/windows/TUI-README.txt') -Destination $tuiStage
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'packaging/THIRD_PARTY_NOTICES.md') -Destination $tuiStage
+    $tuiArchive = Join-Path $outputDir "melos-tui-$version-windows-x64.zip"
+    Compress-Archive -Path (Join-Path $tuiStage '*') -DestinationPath $tuiArchive -Force
+    $tuiHash = (Get-FileHash -LiteralPath $tuiArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+    [IO.File]::WriteAllText("$tuiArchive.sha256", "$tuiHash  $([IO.Path]::GetFileName($tuiArchive))`n")
+
     [pscustomobject]@{ Archive = $archive; SHA256 = $hash; BinaryMB = [math]::Round((Get-Item $binary).Length / 1000000, 2) }
+    [pscustomobject]@{ Archive = $tuiArchive; SHA256 = $tuiHash; BinaryMB = [math]::Round((Get-Item $terminalBinary).Length / 1000000, 2) }
 } finally { Pop-Location }
