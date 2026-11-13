@@ -10,6 +10,7 @@ mod ui;
 use gpui::*;
 
 fn main() {
+    smtc::set_app_user_model_id();
     gpui_platform::application().run(|cx: &mut App| {
         ui::input::bind_keys(cx);
 

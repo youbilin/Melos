@@ -1,4 +1,4 @@
-Melos TUI 0.1.15 — 终端版
+Melos TUI 0.1.16 — 终端版
 
 要求 Windows 10 1903+ / Windows 11（x64），并安装
 Microsoft Visual C++ 2015-2022 Redistributable (x64)：

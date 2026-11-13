@@ -76,9 +76,9 @@ mod platform {
             controls.SetIsPauseEnabled(true)?;
             controls.SetIsNextEnabled(true)?;
             controls.SetIsPreviousEnabled(true)?;
-            controls
-                .DisplayUpdater()?
-                .SetType(MediaPlaybackType::Music)?;
+            let updater = controls.DisplayUpdater()?;
+            updater.SetType(MediaPlaybackType::Music)?;
+            updater.Update()?;
             let commands = Arc::clone(&self.commands);
             let token = controls.ButtonPressed(&TypedEventHandler::<
                 SystemMediaTransportControls,
@@ -226,6 +226,17 @@ mod platform {
     }
 }
 pub use platform::Smtc;
+
+/// Gives the shell a stable identity for the media card and taskbar group.
+pub fn set_app_user_model_id() {
+    #[cfg(windows)]
+    unsafe {
+        let id = windows::core::HSTRING::from("youbilin.Melos");
+        let _ = windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(
+            windows::core::PCWSTR(id.as_ptr()),
+        );
+    }
+}
 #[cfg(windows)]
 pub use platform::prepare_artwork;
 
