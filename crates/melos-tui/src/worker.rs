@@ -7,6 +7,7 @@ pub enum Job {
     Connect,
     Albums(u32),
     Library(u32),
+    ScopeSongs(Vec<String>),
     Album(String),
     Playlists,
     Playlist(String),
@@ -31,6 +32,7 @@ pub enum Data {
         offset: u32,
         received: usize,
     },
+    ScopeSongs(Vec<Song>),
     Playlists(Vec<Playlist>),
     Lyrics(Vec<Lyrics>),
 }
@@ -89,6 +91,17 @@ impl Worker {
                                 offset,
                                 received,
                             }
+                        }
+                        Job::ScopeSongs(albums) => {
+                            let mut songs = Vec::new();
+                            for id in albums {
+                                songs.extend(client.album(&id).await?.song);
+                            }
+                            songs.truncate(2000);
+                            if songs.is_empty() {
+                                return Err(melos_api::Error::Decode("所选专辑没有歌曲".into()));
+                            }
+                            Data::ScopeSongs(songs)
                         }
                         Job::Album(id) => {
                             let album = client.album(&id).await?;

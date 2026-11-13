@@ -9,6 +9,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
+use std::collections::HashSet;
 use std::io::{self, IsTerminal};
 use std::time::Duration;
 use worker::{Data, Job, Worker};
@@ -50,6 +51,7 @@ struct App {
     page: Page,
     history: Vec<Page>,
     albums: Vec<Album>,
+    marked_albums: HashSet<String>,
     offset: u32,
     more: bool,
     playlists: Vec<Playlist>,
@@ -77,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "Melos terminal player\nUsage: melos-tui [--help|--version]\nUses desktop connection settings; MELOS_CONFIG_DIR selects another configuration.\n1 albums · 2 playlists · 3 queue · 4 lyrics · 5 all songs · 6 music sources · / search · Enter open/play\nSpace pause · n/p next/previous · Left/Right seek · +/- volume · s shuffle · r repeat\na append song · i play next · d remove queue entry · J/K reorder · D clear upcoming\nL load more albums · t switch lyrics · e reconnect audio (paused) · Esc cancel/back · q or Ctrl+C quit"
+            "Melos terminal player\nUsage: melos-tui [--help|--version]\nUses desktop connection settings; MELOS_CONFIG_DIR selects another configuration.\n1 albums · 2 playlists · 3 queue · 4 lyrics · 5 all songs · 6 music sources · / search · Enter open/play\nSpace pause · n/p next/previous · Left/Right seek · +/- volume · s shuffle · r repeat\nx mark album · R shuffle marked · a append song · i play next · d remove queue entry · J/K reorder · D clear upcoming\nL load more albums · t switch lyrics · e reconnect audio (paused) · Esc cancel/back · q or Ctrl+C quit"
         );
         return Ok(());
     }
@@ -161,6 +163,7 @@ impl App {
             page: Page::Albums,
             history: Vec::new(),
             albums: Vec::new(),
+            marked_albums: HashSet::new(),
             offset: 0,
             more: true,
             playlists: Vec::new(),
@@ -446,6 +449,20 @@ impl App {
                     self.selection.select(Some(0));
                     self.status.clear();
                 }
+                Ok(Data::ScopeSongs(songs)) => {
+                    if songs.is_empty() {
+                        self.status = "所选专辑没有歌曲".into();
+                    } else {
+                        self.queue.set_shuffle(true);
+                        self.settings.shuffle = true;
+                        self.dirty = true;
+                        self.queue.play_album(songs, 0);
+                        self.start(false);
+                        self.status = format!("已随机播放 {} 首", self.queue.len());
+                        self.page = Page::Queue;
+                        self.selection.select(Some(0));
+                    }
+                }
                 Ok(Data::Playlists(playlists)) => {
                     self.playlists = playlists;
                     self.status.clear();
@@ -677,6 +694,21 @@ impl App {
             KeyCode::Char('4') => self.page(Page::Lyrics),
             KeyCode::Char('5') => self.library(),
             KeyCode::Char('6') => self.open_sources(),
+            KeyCode::Char('x') if self.page == Page::Albums => {
+                if let Some(album) = self.albums.get(index) {
+                    if !self.marked_albums.insert(album.id.clone()) {
+                        self.marked_albums.remove(&album.id);
+                    }
+                    self.status =
+                        format!("已标记 {} 张专辑 · R 随机播放", self.marked_albums.len());
+                }
+            }
+            KeyCode::Char('R') if self.page == Page::Albums && !self.marked_albums.is_empty() => {
+                self.request(Job::ScopeSongs(
+                    self.marked_albums.iter().cloned().collect(),
+                ));
+                self.status = "准备随机播放…".into();
+            }
             KeyCode::Char('a') if self.page == Page::Sources => self.start_source_form(),
             KeyCode::Char('d') if self.page == Page::Sources => self.remove_source_at(index),
             KeyCode::Up | KeyCode::Char('k') => {
@@ -862,12 +894,20 @@ impl App {
         );
         let (title, rows): (String, Vec<ListItem>) = match self.page {
             Page::Albums => (
-                "Albums · Enter open · L load more".into(),
+                format!(
+                    "Albums · Enter open · x mark · R shuffle marked ({}) · L load more",
+                    self.marked_albums.len()
+                ),
                 self.albums
                     .iter()
                     .map(|album| {
                         ListItem::new(format!(
-                            "{} · {}",
+                            "{} {} · {}",
+                            if self.marked_albums.contains(&album.id) {
+                                "✓"
+                            } else {
+                                " "
+                            },
                             album.name,
                             album.artist.as_deref().unwrap_or("")
                         ))
@@ -1085,6 +1125,22 @@ mod tests {
         assert!(!app.queue.shuffle());
         assert_eq!(app.queue.repeat(), RepeatMode::Off);
     }
+    #[test]
+    fn x_marks_and_unmarks_an_album() {
+        let mut app = app();
+        app.albums.push(Album {
+            id: "album-1".into(),
+            name: "Album".into(),
+            ..Default::default()
+        });
+        app.page = Page::Albums;
+        app.selection.select(Some(0));
+        app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.marked_albums.contains("album-1"));
+        app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.marked_albums.is_empty());
+    }
+
     #[test]
     fn source_form_advances_fields_without_saving() {
         let mut app = app();

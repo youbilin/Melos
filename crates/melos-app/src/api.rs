@@ -32,6 +32,10 @@ pub enum Request {
         size: u32,
         offset: u32,
     },
+    ScopeSongs {
+        albums: Vec<String>,
+        artists: Vec<String>,
+    },
     Artists,
     Playlists,
     Playlist {
@@ -94,6 +98,7 @@ pub enum Response {
         offset: u32,
         size: u32,
     },
+    ScopeSongs(Vec<melos_api::Song>),
     Artists(Vec<Artist>),
     Playlists(Vec<Playlist>),
     Playlist(Box<PlaylistWithSongs>),
@@ -366,6 +371,36 @@ async fn handle(client: &mut Option<Client>, request: Request) -> Response {
                 },
                 Err(error) => Response::Error(error.to_string()),
             }
+        }
+
+        Request::ScopeSongs { albums, artists } => {
+            let Some(client) = client.as_ref() else {
+                return Response::Error("尚未连接服务器".into());
+            };
+            let mut songs = Vec::new();
+            for id in albums {
+                match client.album(&id).await {
+                    Ok(album) => songs.extend(album.song),
+                    Err(error) => return Response::Error(error.to_string()),
+                }
+            }
+            for id in artists {
+                let artist = match client.artist(&id).await {
+                    Ok(artist) => artist,
+                    Err(error) => return Response::Error(error.to_string()),
+                };
+                for album in artist.album.iter().take(40) {
+                    match client.album(&album.id).await {
+                        Ok(detail) => songs.extend(detail.song),
+                        Err(error) => return Response::Error(error.to_string()),
+                    }
+                }
+            }
+            if songs.is_empty() {
+                return Response::Error("所选范围没有歌曲".into());
+            }
+            songs.truncate(2000);
+            Response::ScopeSongs(songs)
         }
 
         Request::Artists => {

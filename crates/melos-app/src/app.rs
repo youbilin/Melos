@@ -43,6 +43,12 @@ enum SongSource {
     Search,
 }
 
+#[derive(Clone)]
+struct RandomScope {
+    albums: Vec<String>,
+    artists: Vec<String>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SliderKind {
     Progress,
@@ -161,6 +167,13 @@ pub struct Root {
     library_offset: u32,
     library_loading: bool,
     library_more: bool,
+    scope_mode: bool,
+    scope_albums: Vec<(String, String)>,
+    scope_artists: Vec<(String, String)>,
+    scope_pending: bool,
+    scope_continue: bool,
+    scope_request: Option<RandomScope>,
+    active_scope: Option<RandomScope>,
     artists: Vec<Artist>,
     detail: Option<AlbumWithSongs>,
     artist_view: Option<ArtistWithAlbums>,
@@ -282,6 +295,13 @@ impl Root {
             library_offset: 0,
             library_loading: false,
             library_more: true,
+            scope_mode: false,
+            scope_albums: Vec::new(),
+            scope_artists: Vec::new(),
+            scope_pending: false,
+            scope_continue: false,
+            scope_request: None,
+            active_scope: None,
             artists: Vec::new(),
             detail: None,
             artist_view: None,
@@ -593,6 +613,28 @@ impl Root {
                     self.refresh_upcoming(cx);
                 } else {
                     self.play_songs(fresh, 0, cx);
+                }
+                cx.notify();
+            }
+            Response::ScopeSongs(songs) => {
+                self.scope_pending = false;
+                let continue_playback = std::mem::replace(&mut self.scope_continue, false);
+                let scope = self.scope_request.take();
+                if !self.queue.shuffle() {
+                    self.queue.set_shuffle(true);
+                    self.save_playback_settings(cx);
+                }
+                if continue_playback {
+                    self.queue.append(songs);
+                    if self.queue.next_track().is_some() {
+                        self.start_current(cx);
+                    }
+                } else {
+                    self.scope_mode = false;
+                    self.scope_albums.clear();
+                    self.scope_artists.clear();
+                    self.play_songs(songs, 0, cx);
+                    self.active_scope = scope;
                 }
                 cx.notify();
             }
@@ -1136,6 +1178,12 @@ impl Root {
         self.last_track_index = 0;
         self.random_pending = false;
         self.random_request = self.random_request.wrapping_add(1);
+        self.scope_mode = false;
+        self.scope_albums.clear();
+        self.scope_artists.clear();
+        self.scope_pending = false;
+        self.scope_request = None;
+        self.active_scope = None;
         self.albums.clear();
         self.album_offset = 0;
         self.albums_loading = false;
@@ -1282,6 +1330,7 @@ impl Root {
         if songs.is_empty() {
             return;
         }
+        self.active_scope = None;
         self.queue.play_album(songs, start);
         self.start_current(cx);
     }
@@ -1491,9 +1540,109 @@ impl Root {
             self.random_pending = false;
             self.random_continue = false;
             self.random_request = self.random_request.wrapping_add(1);
+            self.active_scope = None;
             self.refresh_upcoming(cx);
         }
         cx.notify();
+    }
+
+    fn toggle_scope_mode(&mut self, cx: &mut Context<Self>) {
+        self.scope_mode = !self.scope_mode;
+        self.scope_albums.clear();
+        self.scope_artists.clear();
+        cx.notify();
+    }
+
+    fn toggle_album_scope(&mut self, id: String, name: String, cx: &mut Context<Self>) {
+        match self.scope_albums.iter().position(|(album, _)| album == &id) {
+            Some(index) => {
+                self.scope_albums.remove(index);
+            }
+            None => self.scope_albums.push((id, name)),
+        }
+        cx.notify();
+    }
+
+    fn toggle_artist_scope(&mut self, id: String, name: String, cx: &mut Context<Self>) {
+        match self
+            .scope_artists
+            .iter()
+            .position(|(artist, _)| artist == &id)
+        {
+            Some(index) => {
+                self.scope_artists.remove(index);
+            }
+            None => self.scope_artists.push((id, name)),
+        }
+        cx.notify();
+    }
+
+    fn start_scope_random(&mut self, cx: &mut Context<Self>) {
+        if self.scope_albums.is_empty() && self.scope_artists.is_empty() {
+            return;
+        }
+        let scope = RandomScope {
+            albums: self.scope_albums.iter().map(|(id, _)| id.clone()).collect(),
+            artists: self
+                .scope_artists
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect(),
+        };
+        self.scope_pending = true;
+        self.scope_continue = false;
+        self.scope_request = Some(scope.clone());
+        self.api.send(Request::ScopeSongs {
+            albums: scope.albums,
+            artists: scope.artists,
+        });
+        cx.notify();
+    }
+
+    fn scope_toolbar(
+        &self,
+        noun: &'static str,
+        count: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if !self.scope_mode {
+            return div()
+                .flex()
+                .justify_end()
+                .child(ui::ghost_button(
+                    "scope-mode",
+                    "多选随机",
+                    false,
+                    cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                        this.toggle_scope_mode(cx)
+                    }),
+                ))
+                .into_any_element();
+        }
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(ui::muted_label(format!("已选 {count} {noun}")))
+            .child(div().flex_1())
+            .child(ui::primary_button(
+                if self.scope_pending {
+                    "准备中…"
+                } else {
+                    "随机播放选中"
+                },
+                count > 0 && !self.scope_pending,
+                cx.listener(|this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
+                    this.start_scope_random(cx);
+                }),
+            ))
+            .child(ui::ghost_button(
+                "scope-cancel",
+                "取消",
+                false,
+                cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| this.toggle_scope_mode(cx)),
+            ))
+            .into_any_element()
     }
 
     fn request_random_songs(&mut self, continue_playback: bool, cx: &mut Context<Self>) {
@@ -1812,11 +1961,22 @@ impl Root {
             && self.queue.shuffle()
             && self.queue.repeat() == RepeatMode::Off
             && !self.random_pending
+            && !self.scope_pending
             && self
                 .random_retry
                 .is_none_or(|retry| Instant::now() >= retry)
         {
-            self.request_random_songs(true, cx);
+            if let Some(scope) = self.active_scope.clone() {
+                self.scope_pending = true;
+                self.scope_continue = true;
+                self.scope_request = Some(scope.clone());
+                self.api.send(Request::ScopeSongs {
+                    albums: scope.albums,
+                    artists: scope.artists,
+                });
+            } else {
+                self.request_random_songs(true, cx);
+            }
         }
 
         self.sync_smtc_playback();
@@ -1854,6 +2014,9 @@ impl Root {
 
     fn select(&mut self, view: View, cx: &mut Context<Self>) {
         self.view = view;
+        self.scope_mode = false;
+        self.scope_albums.clear();
+        self.scope_artists.clear();
         self.detail = None;
         self.artist_view = None;
         self.playlist_detail = None;
@@ -2190,6 +2353,9 @@ impl Root {
             .px_8()
             .pb_8()
             .gap_3()
+            .when(self.view == View::Albums, |view| {
+                view.child(self.scope_toolbar("张专辑", self.scope_albums.len(), cx))
+            })
             .child(
                 uniform_list(
                     "album-library",
@@ -2728,7 +2894,9 @@ impl Root {
 
     fn album_card(&self, index: usize, album: &Album, cx: &mut Context<Self>) -> impl IntoElement {
         let id = album.id.clone();
+        let name = album.name.clone();
         let artist = album.artist.clone().unwrap_or_default();
+        let selected = self.scope_albums.iter().any(|(album, _)| album == &id);
 
         div()
             .id(format!("album-{}", album.id))
@@ -2738,7 +2906,7 @@ impl Root {
             .min_w_0()
             .cursor_pointer()
             .child(self.cover(Some(album.cover_art.as_deref().unwrap_or(&album.id)), index))
-            .child(div().text_sm().truncate().child(album.name.clone()))
+            .child(div().text_sm().truncate().child(name.clone()))
             .child(
                 div()
                     .text_xs()
@@ -2746,9 +2914,14 @@ impl Root {
                     .truncate()
                     .child(artist),
             )
+            .when(selected, |card| card.child(ui::muted_label("✓ 已选")))
             .on_click(
                 cx.listener(move |this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
-                    this.open_album(id.clone(), cx);
+                    if this.scope_mode {
+                        this.toggle_album_scope(id.clone(), name.clone(), cx);
+                    } else {
+                        this.open_album(id.clone(), cx);
+                    }
                 }),
             )
     }
@@ -2845,6 +3018,8 @@ impl Root {
 
         for artist in &self.artists {
             let id = artist.id.clone();
+            let name = artist.name.clone();
+            let selected = self.scope_artists.iter().any(|(artist, _)| artist == &id);
             list = list.child(
                 div()
                     .id(format!("artist-{}", artist.id))
@@ -2856,20 +3031,38 @@ impl Root {
                     .rounded_md()
                     .cursor_pointer()
                     .hover(|style| style.bg(rgba(0xFFFFFF0A)))
-                    .child(div().text_sm().child(artist.name.clone()))
+                    .when(selected, |row| row.bg(rgba(0xFFFFFF12)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_sm().child(name.clone()))
+                            .when(selected, |row| row.child(ui::muted_label("✓ 已选"))),
+                    )
                     .child(ui::muted_label(format!(
                         "{} 张专辑",
                         artist.album_count.unwrap_or(0)
                     )))
                     .on_click(cx.listener(
                         move |this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
-                            this.open_artist(id.clone(), cx);
+                            if this.scope_mode {
+                                this.toggle_artist_scope(id.clone(), name.clone(), cx);
+                            } else {
+                                this.open_artist(id.clone(), cx);
+                            }
                         },
                     )),
             );
         }
 
-        list.into_any_element()
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(self.scope_toolbar("位艺人", self.scope_artists.len(), cx))
+            .child(list)
+            .into_any_element()
     }
 
     // ------------------------------------------------------------------ search
