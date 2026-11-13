@@ -213,7 +213,7 @@
 - 上一版本三次隐藏初始化报告时间：1,040.9 / 268.8 / 269.6 ms；工作集 47.54 / 47.96 / 48.07 MB，作为历史粗测保留。
 - 以上为隐藏窗口初始化与短时空闲场景；不代表可见首帧、受控冷启动、大曲库或长时间播放内存。首次仍高于 1 秒，冷启动验收不标为通过。
 - 支持 Windows 10 1903+ / Windows 11 x64，需要系统安装 Visual C++ Redistributable。
-- GitHub Actions 配置格式、测试、30 秒恢复、Clippy、底层依赖检查与 Windows 绿色版构建，产物保留在私有仓库中；不发布 GitHub Release。
+- GitHub Actions 配置格式、测试、30 秒恢复、Clippy、底层依赖检查与 Windows 绿色版构建，产物保留在仓库 Actions 中；0.1.16 起发布 GitHub Release。
 - CI 结果与本地检查分别记录：`362b548`（0.1.5）的 [GitHub Actions](https://github.com/youbilin/Melos/actions/runs/43229982144) 已通过，包含格式、测试、30 秒恢复、Clippy、底层依赖和打包；0.1.6 与 0.1.7 提交分别单独追踪。此前歌词单独提交的工作流因后续提交取消，不计为独立通过。
 
 ## 发布前待验收
