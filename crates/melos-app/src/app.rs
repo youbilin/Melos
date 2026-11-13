@@ -30,6 +30,7 @@ const CONTENT_PADDING: f32 = 64.0;
 const CARD_MIN: f32 = 160.0;
 const CARD_GAP: f32 = 24.0;
 const ALBUM_PAGE_SIZE: u32 = 80;
+const RANDOM_BATCH: u32 = 100;
 const SONG_ROW_HEIGHT: f32 = 76.0;
 const QUEUE_ROW_HEIGHT: f32 = 76.0;
 
@@ -187,6 +188,15 @@ pub struct Root {
     lyrics_scroll: ScrollHandle,
     lyrics_active: Option<usize>,
     lyrics_follow: bool,
+    lyrics_scrolled_to: Option<usize>,
+    lyrics_center_height: f32,
+    lyrics_scroll_generation: u64,
+    lyrics_center_retry: bool,
+    lyrics_return: View,
+    random_request: u64,
+    random_pending: bool,
+    random_continue: bool,
+    random_retry: Option<Instant>,
     scrobbled_playing: bool,
     scrobbled_submitted: bool,
 }
@@ -287,6 +297,15 @@ impl Root {
             lyrics_scroll: ScrollHandle::new(),
             lyrics_active: None,
             lyrics_follow: true,
+            lyrics_scrolled_to: None,
+            lyrics_center_height: 0.,
+            lyrics_scroll_generation: 0,
+            lyrics_center_retry: false,
+            lyrics_return: View::Home,
+            random_request: 0,
+            random_pending: false,
+            random_continue: false,
+            random_retry: None,
             scrobbled_playing: false,
             scrobbled_submitted: false,
         };
@@ -462,6 +481,62 @@ impl Root {
                 self.search_result = Some(*result);
                 self.search_results_generation = self.search_results_generation.wrapping_add(1);
             }
+            Response::RandomSongs {
+                request_id,
+                songs,
+                error,
+            } => {
+                if request_id != self.random_request {
+                    return;
+                }
+                self.random_pending = false;
+                let continue_playback = std::mem::replace(&mut self.random_continue, false);
+                if !self.queue.shuffle() {
+                    return;
+                }
+                if let Some(error) = error {
+                    self.random_retry = Some(Instant::now() + Duration::from_secs(30));
+                    if !continue_playback {
+                        self.error = Some(format!("随机播放失败：{error}"));
+                    }
+                    return;
+                }
+                let mut known: HashSet<String> = self
+                    .queue
+                    .songs()
+                    .iter()
+                    .map(|song| song.id.clone())
+                    .collect();
+                let fresh: Vec<Song> = songs
+                    .into_iter()
+                    .filter(|song| known.insert(song.id.clone()))
+                    .collect();
+                if fresh.is_empty() {
+                    self.random_retry = Some(Instant::now() + Duration::from_secs(30));
+                    if !continue_playback {
+                        self.error = Some("服务器没有返回新的随机歌曲".into());
+                    }
+                    return;
+                }
+                let ended = self
+                    .engine
+                    .as_ref()
+                    .is_some_and(|engine| engine.snapshot().ended);
+                if continue_playback || ended {
+                    self.queue.append(fresh);
+                    if self.queue.next_track().is_some() {
+                        self.start_current(cx);
+                    }
+                } else if self.now_playing.is_some() {
+                    // Keep the current song; everything after it becomes library-random.
+                    self.queue.clear_upcoming();
+                    self.queue.append(fresh);
+                    self.refresh_upcoming(cx);
+                } else {
+                    self.play_songs(fresh, 0, cx);
+                }
+                cx.notify();
+            }
             Response::Cover { id, bytes } => {
                 self.cover_requests.remove(&id);
                 self.priority_cover_requests.remove(&id);
@@ -582,6 +657,10 @@ impl Root {
         self.lyrics_active = None;
         self.lyrics_scroll = ScrollHandle::new();
         self.lyrics_follow = true;
+        self.lyrics_scrolled_to = None;
+        self.lyrics_center_height = 0.;
+        self.lyrics_scroll_generation = self.lyrics_scroll_generation.wrapping_add(1);
+        self.lyrics_center_retry = false;
     }
 
     #[cfg(windows)]
@@ -655,24 +734,86 @@ impl Root {
             let range = lyrics.active_range(self.position_ms);
             (!range.is_empty()).then_some(range.start)
         });
-        if active != self.lyrics_active {
-            self.lyrics_active = active;
-            if self.lyrics_follow
-                && let Some(index) = active
-            {
-                self.center_lyrics(index);
-            }
-        }
+        self.lyrics_active = active;
     }
 
-    fn center_lyrics(&self, index: usize) {
+    /// Target offset that puts the given lyric line in the middle of the viewport.
+    fn lyrics_center_target(&self, index: usize) -> Option<f32> {
         let viewport = self.lyrics_scroll.bounds();
-        if let Some(line) = self.lyrics_scroll.bounds_for_item(index)
-            && viewport.size.height > px(0.)
-        {
-            self.lyrics_scroll
-                .set_offset(point(px(0.), viewport.center().y - line.center().y));
+        if viewport.size.height <= px(0.) {
+            return None;
         }
+        let line = self.lyrics_scroll.bounds_for_item(index)?;
+        Some((viewport.center().y - line.center().y).as_f32())
+    }
+
+    /// Centers the active line whenever it changes. Bounds only exist after the
+    /// lyrics view has been laid out, so a missing target is retried on the next
+    /// frame instead of silently dropping the scroll.
+    fn follow_lyrics(&mut self, cx: &mut Context<Self>) {
+        if self.view != View::Lyrics || !self.lyrics_follow {
+            return;
+        }
+        let Some(index) = self.lyrics_active else {
+            return;
+        };
+        let height = self.lyrics_scroll.bounds().size.height.as_f32();
+        if self.lyrics_scrolled_to == Some(index) && self.lyrics_center_height == height {
+            return;
+        }
+        let Some(target) = self.lyrics_center_target(index) else {
+            if !self.lyrics_center_retry {
+                self.lyrics_center_retry = true;
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(32))
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.lyrics_center_retry = false;
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            return;
+        };
+        self.lyrics_scrolled_to = Some(index);
+        self.lyrics_center_height = height;
+        self.scroll_lyrics_to(target, true, cx);
+    }
+
+    fn scroll_lyrics_to(&mut self, target: f32, animate: bool, cx: &mut Context<Self>) {
+        self.lyrics_scroll_generation = self.lyrics_scroll_generation.wrapping_add(1);
+        let generation = self.lyrics_scroll_generation;
+        let start = self.lyrics_scroll.offset().y.as_f32();
+        if !animate || (target - start).abs() < 1.0 {
+            self.lyrics_scroll.set_offset(point(px(0.), px(target)));
+            return;
+        }
+        let started = Instant::now();
+        let delta = target - start;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                let step = this.update(cx, |this, cx| {
+                    if this.lyrics_scroll_generation != generation {
+                        return true;
+                    }
+                    let progress = (started.elapsed().as_secs_f32() / 0.24).min(1.0);
+                    let eased = 1.0 - (1.0 - progress).powi(3);
+                    this.lyrics_scroll
+                        .set_offset(point(px(0.), px(start + delta * eased)));
+                    cx.notify();
+                    progress >= 1.0
+                });
+                if !matches!(step, Ok(false)) {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn sidebar_width(&self) -> f32 {
@@ -1137,9 +1278,30 @@ impl Root {
 
     fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
         self.sync_engine(cx);
-        self.queue.set_shuffle(!self.queue.shuffle());
-        self.refresh_upcoming(cx);
+        let on = !self.queue.shuffle();
+        self.queue.set_shuffle(on);
+        self.random_retry = None;
         self.save_playback_settings(cx);
+        if on {
+            // Shuffle draws from the whole library, not just the current queue.
+            self.request_random_songs(false, cx);
+        } else {
+            self.random_pending = false;
+            self.random_continue = false;
+            self.random_request = self.random_request.wrapping_add(1);
+            self.refresh_upcoming(cx);
+        }
+        cx.notify();
+    }
+
+    fn request_random_songs(&mut self, continue_playback: bool, cx: &mut Context<Self>) {
+        self.random_request = self.random_request.wrapping_add(1);
+        self.random_pending = true;
+        self.random_continue = continue_playback;
+        self.api.send(Request::RandomSongs {
+            request_id: self.random_request,
+            size: RANDOM_BATCH,
+        });
         cx.notify();
     }
 
@@ -1438,9 +1600,21 @@ impl Root {
         }
 
         self.sync_lyrics();
-        if snapshot.ended && self.playing {
+        let natural_end = snapshot.ended && self.playing;
+        if natural_end {
             self.playing = false;
             changed = true;
+        }
+        // Library shuffle keeps playing when a finite queue reaches its end.
+        if natural_end
+            && self.queue.shuffle()
+            && self.queue.repeat() == RepeatMode::Off
+            && !self.random_pending
+            && self
+                .random_retry
+                .is_none_or(|retry| Instant::now() >= retry)
+        {
+            self.request_random_songs(true, cx);
         }
 
         self.sync_smtc_playback();
@@ -1488,6 +1662,27 @@ impl Root {
             self.playlists_loading = true;
             self.api.send_priority(Request::Playlists);
         }
+        cx.notify();
+    }
+
+    /// Opens or closes the lyrics page from the artwork, keeping the browsing
+    /// context (album detail, artist page) intact.
+    fn toggle_lyrics(&mut self, cx: &mut Context<Self>) {
+        if self.view == View::Lyrics {
+            self.view = self.lyrics_return;
+        } else {
+            if self.now_playing.is_none() {
+                return;
+            }
+            self.lyrics_return = self.view;
+            self.view = View::Lyrics;
+            // The previous page had no lyric children, so start from a clean
+            // handle instead of measuring against stale line bounds.
+            self.lyrics_scroll = ScrollHandle::new();
+            self.lyrics_center_retry = false;
+        }
+        self.lyrics_scrolled_to = None;
+        self.lyrics_center_height = 0.;
         cx.notify();
     }
 
@@ -2572,9 +2767,14 @@ impl Root {
             .border_color(rgb(theme::BORDER))
             .child(
                 div()
+                    .id("player-artwork")
                     .size(px(48.))
                     .flex_shrink_0()
                     .overflow_hidden()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                        this.toggle_lyrics(cx);
+                    }))
                     .child(self.cover(cover_id, 0)),
             )
             .child(
@@ -2666,36 +2866,15 @@ impl Root {
                     .w(px(120.))
                     .child(self.volume_slider(cx)),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(ui::compact_button(
-                        "lyrics",
-                        "歌词",
-                        self.view == View::Lyrics,
-                        cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
-                            this.select(
-                                if this.view == View::Lyrics {
-                                    View::Home
-                                } else {
-                                    View::Lyrics
-                                },
-                                cx,
-                            );
-                        }),
-                    ))
-                    .child(ui::compact_button(
-                        "queue",
-                        "队列",
-                        self.queue_open,
-                        cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
-                            this.queue_open = !this.queue_open;
-                            cx.notify();
-                        }),
-                    )),
-            )
+            .child(ui::compact_button(
+                "queue",
+                "队列",
+                self.queue_open,
+                cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                    this.queue_open = !this.queue_open;
+                    cx.notify();
+                }),
+            ))
     }
 
     fn lyrics_view(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -2724,12 +2903,17 @@ impl Root {
             .gap_3()
             .child(
                 div()
+                    .id("lyrics-artwork")
                     .size(px(cover_width))
                     .rounded_lg()
                     .overflow_hidden()
                     .border_1()
                     .border_color(rgb(theme::BORDER))
                     .shadow_lg()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                        this.toggle_lyrics(cx);
+                    }))
                     .child(self.cover(cover_id, 0)),
             );
         if self.lyrics.len() > 1 {
@@ -2741,6 +2925,9 @@ impl Root {
                     this.lyrics_track = (this.lyrics_track + 1) % this.lyrics.len();
                     this.lyrics_scroll = ScrollHandle::new();
                     this.lyrics_active = None;
+                    this.lyrics_scrolled_to = None;
+                    this.lyrics_center_height = 0.;
+                    this.lyrics_scroll_generation = this.lyrics_scroll_generation.wrapping_add(1);
                     this.sync_lyrics();
                     cx.notify();
                 }),
@@ -2789,6 +2976,12 @@ impl Root {
             .min_w_0()
             .overflow_y_scroll()
             .track_scroll(&self.lyrics_scroll)
+            // Manual scrolling takes over from the follow animation.
+            .on_scroll(cx.listener(
+                |this: &mut Root, _: &ScrollEvent, _: &mut Window, _: &mut Context<Self>| {
+                    this.lyrics_scroll_generation = this.lyrics_scroll_generation.wrapping_add(1);
+                },
+            ))
             .flex()
             .flex_col()
             .pt(px(padding))
@@ -3013,12 +3206,7 @@ impl Root {
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.view == View::Lyrics
-            && self.lyrics_follow
-            && let Some(index) = self.lyrics_active
-        {
-            self.center_lyrics(index);
-        }
+        self.follow_lyrics(cx);
         if window.focused(cx).is_none() {
             window.focus(&self.focus_handle, cx);
         }

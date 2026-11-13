@@ -257,3 +257,9 @@ pub struct PlaylistsPayload {
     #[serde(default)]
     pub playlist: Vec<Playlist>,
 }
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SongsPayload {
+    #[serde(default)]
+    pub song: Vec<Song>,
+}

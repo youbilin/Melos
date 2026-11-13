@@ -55,6 +55,10 @@ pub enum Request {
     Search {
         query: String,
     },
+    RandomSongs {
+        request_id: u64,
+        size: u32,
+    },
     Cover {
         id: String,
         size: u32,
@@ -96,6 +100,11 @@ pub enum Response {
     Album(Box<AlbumWithSongs>),
     Artist(Box<ArtistWithAlbums>),
     Search(Box<SearchResult>),
+    RandomSongs {
+        request_id: u64,
+        songs: Vec<melos_api::Song>,
+        error: Option<String>,
+    },
     Cover {
         id: String,
         bytes: Vec<u8>,
@@ -373,6 +382,28 @@ async fn handle(client: &mut Option<Client>, request: Request) -> Response {
             match client.search(&query).await {
                 Ok(result) => Response::Search(Box::new(result)),
                 Err(error) => Response::Error(error.to_string()),
+            }
+        }
+
+        Request::RandomSongs { request_id, size } => {
+            let Some(client) = client.as_ref() else {
+                return Response::RandomSongs {
+                    request_id,
+                    songs: Vec::new(),
+                    error: Some("尚未连接服务器".into()),
+                };
+            };
+            match client.random_songs(size).await {
+                Ok(songs) => Response::RandomSongs {
+                    request_id,
+                    songs,
+                    error: None,
+                },
+                Err(error) => Response::RandomSongs {
+                    request_id,
+                    songs: Vec::new(),
+                    error: Some(error.to_string()),
+                },
             }
         }
 

@@ -266,6 +266,23 @@ impl Client {
         }
     }
 
+    /// `getRandomSongs`: a random sample drawn from the whole library.
+    pub async fn random_songs(&self, size: u32) -> Result<Vec<Song>, Error> {
+        let mut payload = self
+            .get("getRandomSongs", &[("size", size.min(500).to_string())])
+            .await?;
+
+        match payload.remove("randomSongs") {
+            Some(value) => {
+                let list: SongsPayload = serde_json::from_value(value)
+                    .map_err(|e| Error::Decode(format!("randomSongs: {e}")))?;
+                Ok(list.song)
+            }
+            // A library without playable songs omits the object entirely.
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// `search3`: artists, albums and songs in one round trip.
     pub async fn search(&self, query: &str) -> Result<SearchResult, Error> {
         let mut payload = self.get("search3", &[("query", query.to_owned())]).await?;
@@ -643,6 +660,18 @@ mod tests {
         assert_eq!(album.album.artist.as_deref(), Some("Artist"));
         assert_eq!(album.song.len(), 1);
         assert_eq!(album.song[0].suffix.as_deref(), Some("flac"));
+    }
+
+    #[tokio::test]
+    async fn random_songs_parses_the_sample() {
+        let server = serve_once(
+            r#"{"subsonic-response":{"status":"ok","version":"1.16.1","randomSongs":{"song":[{"id":"s1","title":"One","suffix":"flac"},{"id":"s2","title":"Two"}]}}}"#,
+        )
+        .await;
+
+        let songs = client(&server).random_songs(9999).await.unwrap();
+        assert_eq!(songs.len(), 2);
+        assert_eq!(songs[1].title, "Two");
     }
 
     #[tokio::test]
