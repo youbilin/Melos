@@ -20,6 +20,21 @@ enum Page {
     Playlists,
     Queue,
     Lyrics,
+    Sources,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceField {
+    Server,
+    Username,
+    Password,
+}
+
+struct SourceForm {
+    field: SourceField,
+    server: String,
+    username: String,
+    password: String,
 }
 
 struct App {
@@ -53,6 +68,8 @@ struct App {
     lyrics_status: Option<String>,
     lyrics_track: usize,
     lyrics_selection: ListState,
+    source_selection: ListState,
+    source_form: Option<SourceForm>,
     scrobbled: bool,
 }
 
@@ -60,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "Melos terminal player\nUsage: melos-tui [--help|--version]\nUses desktop connection settings; MELOS_CONFIG_DIR selects another configuration.\n1 albums · 2 playlists · 3 queue · 4 lyrics · 5 all songs · / search · Enter open/play\nSpace pause · n/p next/previous · Left/Right seek · +/- volume · s shuffle · r repeat\na append song · i play next · d remove queue entry · J/K reorder · D clear upcoming\nL load more albums · t switch lyrics · e reconnect audio (paused) · Esc cancel/back · q or Ctrl+C quit"
+            "Melos terminal player\nUsage: melos-tui [--help|--version]\nUses desktop connection settings; MELOS_CONFIG_DIR selects another configuration.\n1 albums · 2 playlists · 3 queue · 4 lyrics · 5 all songs · 6 music sources · / search · Enter open/play\nSpace pause · n/p next/previous · Left/Right seek · +/- volume · s shuffle · r repeat\na append song · i play next · d remove queue entry · J/K reorder · D clear upcoming\nL load more albums · t switch lyrics · e reconnect audio (paused) · Esc cancel/back · q or Ctrl+C quit"
         );
         return Ok(());
     }
@@ -75,20 +92,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Run melos-tui in an interactive terminal.".into());
     }
     let settings = Settings::load();
-    let password = settings
-        .password()
-        .ok_or("Connect and save credentials in the desktop app first.")?;
-    if settings.server.is_empty() || settings.username.is_empty() {
-        return Err(
-            "Connect in the desktop app first, or select settings with MELOS_CONFIG_DIR.".into(),
-        );
-    }
-    let client = Client::new(
-        &settings.server,
-        Credentials::new(&settings.username, password),
-    )?;
+    let password = settings.password();
+    let ready = !settings.server.is_empty() && !settings.username.is_empty() && password.is_some();
+    let client = match (ready, password) {
+        (true, Some(password)) => Client::new(
+            &settings.server,
+            Credentials::new(&settings.username, password),
+        )?,
+        _ => Client::new("http://127.0.0.1:1", Credentials::new("unset", "unset"))?,
+    };
     let mut app = App::new(client, settings, true);
-    app.request(Job::Connect);
+    if ready {
+        app.request(Job::Connect);
+    } else {
+        app.page = Page::Sources;
+        app.status = "没有保存的连接；按 a 添加音乐源".into();
+    }
     // Ratatui restores raw mode, alternate screen and cursor on errors;
     // its panic hook also restores the terminal before reporting a panic.
     let result = ratatui::run(|terminal| -> io::Result<()> {
@@ -160,6 +179,8 @@ impl App {
             lyrics_status: None,
             lyrics_track: 0,
             lyrics_selection: ListState::default(),
+            source_selection: ListState::default(),
+            source_form: None,
             scrobbled: false,
         }
     }
@@ -207,6 +228,152 @@ impl App {
         self.songs_more = true;
         self.title = "全部歌曲".into();
         self.request(Job::Library(0));
+    }
+
+    fn open_sources(&mut self) {
+        if self.page != Page::Sources {
+            self.history.push(self.page);
+        }
+        self.show(Page::Sources);
+        let active = self.settings.active_source();
+        self.source_selection.select(Some(active));
+    }
+
+    fn connect_saved(&mut self, index: usize) {
+        if !self.settings.switch_source(index) {
+            return;
+        }
+        let _ = self.settings.save();
+        let Some(password) = self.settings.password() else {
+            self.status = "无法解密的密码；请重新添加音乐源".into();
+            return;
+        };
+        let server = self.settings.server.clone();
+        let username = self.settings.username.clone();
+        self.open_connection(server, username, password);
+    }
+
+    fn open_connection(&mut self, server: String, username: String, password: String) {
+        let client = match Client::new(&server, Credentials::new(username.clone(), password)) {
+            Ok(client) => client,
+            Err(error) => {
+                self.status = error.to_string();
+                return;
+            }
+        };
+        if let Some(engine) = self.engine.as_ref() {
+            engine.stop();
+        }
+        self.queue.clear();
+        self.albums.clear();
+        self.offset = 0;
+        self.more = true;
+        self.playlists.clear();
+        self.songs.clear();
+        self.songs_library = false;
+        self.songs_more = false;
+        self.lyrics.clear();
+        self.lyrics_song = None;
+        self.lyrics_selection = ListState::default();
+        self.source_form = None;
+        self.started = false;
+        self.boundary = 0;
+        self.scrobbled = false;
+        self.snapshot = EngineSnapshot::default();
+        self.settings.server = server;
+        self.settings.username = username;
+        self.worker = Worker::new(client.clone());
+        self.client = client;
+        self.request(Job::Connect);
+        self.page = Page::Albums;
+        self.selection.select(Some(0));
+        self.status = "连接中…".into();
+    }
+
+    fn start_source_form(&mut self) {
+        self.source_form = Some(SourceForm {
+            field: SourceField::Server,
+            server: String::new(),
+            username: String::new(),
+            password: String::new(),
+        });
+        self.status = "添加音乐源：服务器地址".into();
+    }
+
+    fn source_form_key(&mut self, key: KeyEvent) -> bool {
+        let Some(mut form) = self.source_form.take() else {
+            return false;
+        };
+        let mut submit = false;
+        let mut cancelled = false;
+        match key.code {
+            KeyCode::Esc => {
+                cancelled = true;
+                self.status = "已取消添加".into();
+            }
+            KeyCode::Enter => match form.field {
+                SourceField::Server if !form.server.trim().is_empty() => {
+                    form.field = SourceField::Username;
+                    self.status = "添加音乐源：用户名".into();
+                }
+                SourceField::Username if !form.username.trim().is_empty() => {
+                    form.field = SourceField::Password;
+                    self.status = "添加音乐源：密码".into();
+                }
+                SourceField::Password if !form.password.is_empty() => submit = true,
+                _ => {}
+            },
+            KeyCode::Backspace => {
+                let field = match form.field {
+                    SourceField::Server => &mut form.server,
+                    SourceField::Username => &mut form.username,
+                    SourceField::Password => &mut form.password,
+                };
+                field.pop();
+            }
+            KeyCode::Char(ch)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                match form.field {
+                    SourceField::Server => form.server.push(ch),
+                    SourceField::Username => form.username.push(ch),
+                    SourceField::Password => form.password.push(ch),
+                }
+            }
+            _ => {}
+        }
+        if submit {
+            self.finish_source_form(form);
+        } else if !cancelled {
+            self.source_form = Some(form);
+        }
+        false
+    }
+
+    fn finish_source_form(&mut self, form: SourceForm) {
+        let server = form.server.trim().to_owned();
+        let username = form.username.trim().to_owned();
+        match self.settings.add_source(&server, &username, &form.password) {
+            Ok(index) => {
+                let _ = self.settings.save();
+                self.status = "已添加，正在连接…".into();
+                self.connect_saved(index);
+            }
+            Err(error) => self.status = format!("保存失败：{error}"),
+        }
+    }
+
+    fn remove_source_at(&mut self, index: usize) {
+        if self.settings.remove_source(index) {
+            let _ = self.settings.save();
+            self.status = "已删除音乐源".into();
+            let index = index.min(self.settings.sources().len().saturating_sub(1));
+            self.source_selection.select(Some(index));
+        } else {
+            self.status = "当前音乐源不能删除；请先切换到其他源".into();
+        }
     }
     fn tick(&mut self) {
         for response in self.worker.drain() {
@@ -420,6 +587,14 @@ impl App {
                 .get(self.lyrics_track)
                 .map(|lyrics| lyrics.lines.len())
                 .unwrap_or(0),
+            Page::Sources => self.settings.sources().len(),
+        }
+    }
+    fn selection_state(&mut self) -> &mut ListState {
+        match self.page {
+            Page::Lyrics => &mut self.lyrics_selection,
+            Page::Sources => &mut self.source_selection,
+            _ => &mut self.selection,
         }
     }
     fn reconnect_output(&mut self) {
@@ -463,6 +638,9 @@ impl App {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return true;
         }
+        if self.source_form.is_some() {
+            return self.source_form_key(key);
+        }
         if let Some(query) = self.query.as_mut() {
             match key.code {
                 KeyCode::Esc => self.query = None,
@@ -487,12 +665,7 @@ impl App {
             return false;
         }
         self.sync();
-        let index = if self.page == Page::Lyrics {
-            self.lyrics_selection.selected()
-        } else {
-            self.selection.selected()
-        }
-        .unwrap_or(0);
+        let index = self.selection_state().selected().unwrap_or(0);
         match key.code {
             KeyCode::Char('q') => return true,
             KeyCode::Char('e') => self.reconnect_output(),
@@ -503,20 +676,15 @@ impl App {
             KeyCode::Char('3') => self.page(Page::Queue),
             KeyCode::Char('4') => self.page(Page::Lyrics),
             KeyCode::Char('5') => self.library(),
+            KeyCode::Char('6') => self.open_sources(),
+            KeyCode::Char('a') if self.page == Page::Sources => self.start_source_form(),
+            KeyCode::Char('d') if self.page == Page::Sources => self.remove_source_at(index),
             KeyCode::Up | KeyCode::Char('k') => {
-                if self.page == Page::Lyrics {
-                    self.lyrics_selection.select(Some(index.saturating_sub(1)));
-                } else {
-                    self.selection.select(Some(index.saturating_sub(1)));
-                }
+                self.selection_state().select(Some(index.saturating_sub(1)));
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 let index = (index + 1).min(self.len().saturating_sub(1));
-                if self.page == Page::Lyrics {
-                    self.lyrics_selection.select(Some(index));
-                } else {
-                    self.selection.select(Some(index));
-                }
+                self.selection_state().select(Some(index));
             }
             KeyCode::Char('L')
                 if self.page == Page::Songs
@@ -554,6 +722,7 @@ impl App {
                     }
                 }
                 Page::Lyrics => {}
+                Page::Sources => self.connect_saved(index),
             },
             KeyCode::Char(' ') => {
                 if !self.started || self.snapshot.ended {
@@ -685,7 +854,7 @@ impl App {
         .areas(frame.area());
         frame.render_widget(
             Paragraph::new(format!(
-                "Melos {} · 1 Albums · 2 Playlists · 3 Queue · 4 Lyrics · 5 Songs · / Search",
+                "Melos {} · 1 Albums · 2 Playlists · 3 Queue · 4 Lyrics · 5 Songs · 6 Sources · / Search",
                 env!("CARGO_PKG_VERSION")
             ))
             .block(Block::bordered()),
@@ -758,6 +927,30 @@ impl App {
                     })
                     .collect(),
             ),
+            Page::Sources => (
+                "音乐源 · Enter 连接 · a 添加 · d 删除".into(),
+                if self.settings.sources().is_empty() {
+                    vec![ListItem::new("没有保存的音乐源；按 a 添加")]
+                } else {
+                    self.settings
+                        .sources()
+                        .iter()
+                        .enumerate()
+                        .map(|(index, source)| {
+                            ListItem::new(format!(
+                                "{} {} · {}",
+                                if index == self.settings.active_source() {
+                                    "●"
+                                } else {
+                                    " "
+                                },
+                                source.username,
+                                source.server
+                            ))
+                        })
+                        .collect()
+                },
+            ),
             Page::Lyrics => {
                 let lyrics = self.lyrics.get(self.lyrics_track);
                 let active = lyrics
@@ -812,11 +1005,7 @@ impl App {
                 .highlight_style(Style::default().bg(Color::DarkGray))
                 .highlight_symbol("› "),
             body,
-            if self.page == Page::Lyrics {
-                &mut self.lyrics_selection
-            } else {
-                &mut self.selection
-            },
+            self.selection_state(),
         );
         let song = if self.started {
             self.queue
@@ -844,16 +1033,23 @@ impl App {
             .block(Block::bordered()),
             player,
         );
-        let status = self
-            .query
-            .as_ref()
-            .map(|query| format!("Search: {query} · Enter submit · Esc cancel"))
-            .unwrap_or_else(|| {
-                format!(
-                    "{}\nSpace pause · n/p skip · ←/→ seek · +/- volume · e audio · Esc back · q quit",
-                    self.status
-                )
-            });
+        let status = if let Some(form) = &self.source_form {
+            let field = match form.field {
+                SourceField::Server => format!("服务器: {}", form.server),
+                SourceField::Username => format!("用户名: {}", form.username),
+                SourceField::Password => {
+                    format!("密码: {}", "*".repeat(form.password.chars().count()))
+                }
+            };
+            format!("{field} · Enter next · Esc cancel")
+        } else if let Some(query) = &self.query {
+            format!("Search: {query} · Enter submit · Esc cancel")
+        } else {
+            format!(
+                "{}\nSpace pause · n/p skip · ←/→ seek · +/- volume · e audio · Esc back · q quit",
+                self.status
+            )
+        };
         frame.render_widget(
             Paragraph::new(status)
                 .wrap(Wrap { trim: false })
@@ -889,6 +1085,37 @@ mod tests {
         assert!(!app.queue.shuffle());
         assert_eq!(app.queue.repeat(), RepeatMode::Off);
     }
+    #[test]
+    fn source_form_advances_fields_without_saving() {
+        let mut app = app();
+        app.page = Page::Sources;
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        let form = app.source_form.as_ref().expect("form opened");
+        assert_eq!(form.field, SourceField::Server);
+
+        for ch in "http://example.test".chars() {
+            app.key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.source_form.as_ref().unwrap().field,
+            SourceField::Username
+        );
+
+        for ch in "listener".chars() {
+            app.key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.source_form.as_ref().unwrap().field,
+            SourceField::Password
+        );
+
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.source_form.is_none());
+        assert!(!app.dirty);
+    }
+
     #[test]
     fn esc_returns_to_the_previous_page() {
         let mut app = app();
