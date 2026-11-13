@@ -29,7 +29,7 @@ Melos 是一个面向自建音乐库的 Windows 客户端。桌面端使用 GPUI
 
 ## 下载
 
-发布包由 `./packaging/build-windows.ps1` 生成于 `output/release/`，每个 ZIP 旁附 `.sha256`。
+最新版可从 [GitHub Releases](https://github.com/youbilin/Melos/releases/latest) 下载；本地构建产物由 `./packaging/build-windows.ps1` 生成于 `output/release/`，每个 ZIP 旁附 `.sha256`。
 
 | 包 | 大小 | 内容 |
 |---|---:|---|
