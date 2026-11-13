@@ -1,4 +1,4 @@
-Melos TUI 0.1.14 — 终端版
+Melos TUI 0.1.15 — 终端版
 
 要求 Windows 10 1903+ / Windows 11（x64），并安装
 Microsoft Visual C++ 2015-2022 Redistributable (x64)：
@@ -13,7 +13,7 @@ https://aka.ms/vs/17/release/vc_redist.x64.exe
 
 按键
 1 专辑 / 2 歌单 / 3 队列 / 4 歌词 / 5 全部歌曲 / 6 音乐源 / 7 艺人
-/ 搜索歌曲（Enter 提交，Esc 取消）
+/ 搜索歌曲；在艺人页搜索艺人（Enter 提交，Esc 取消）
 ↑/↓ 或 k/j 选择，Enter 打开专辑/歌单或播放歌曲
 Space 播放/暂停，n/p 上一首/下一首，←/→ 快退/快进 5 秒
 +/- 音量，s 随机，r 循环

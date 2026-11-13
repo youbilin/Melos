@@ -17,6 +17,7 @@ pub enum Job {
     Playlists,
     Playlist(String),
     Search(String),
+    SearchArtists(String),
     Lyrics(Box<Song>),
     NowPlaying(String),
     Scrobble(String),
@@ -38,6 +39,10 @@ pub enum Data {
         received: usize,
     },
     Artists(Vec<Artist>),
+    ArtistSearch {
+        artists: Vec<Artist>,
+        query: String,
+    },
     ScopeSongs(Vec<Song>),
     Playlists(Vec<Playlist>),
     Lyrics(Vec<Lyrics>),
@@ -99,6 +104,10 @@ impl Worker {
                             }
                         }
                         Job::Artists => Data::Artists(client.artists().await?),
+                        Job::SearchArtists(query) => Data::ArtistSearch {
+                            artists: client.search(&query).await?.artist,
+                            query,
+                        },
                         Job::ArtistSongs(id) => {
                             let artist = client.artist(&id).await?;
                             let mut songs = Vec::new();

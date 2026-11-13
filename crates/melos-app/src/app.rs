@@ -1548,6 +1548,10 @@ impl Root {
 
     fn toggle_scope_mode(&mut self, cx: &mut Context<Self>) {
         self.scope_mode = !self.scope_mode;
+        cx.notify();
+    }
+
+    fn clear_scope(&mut self, cx: &mut Context<Self>) {
         self.scope_albums.clear();
         self.scope_artists.clear();
         cx.notify();
@@ -1599,13 +1603,9 @@ impl Root {
         cx.notify();
     }
 
-    fn scope_toolbar(
-        &self,
-        noun: &'static str,
-        count: usize,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        if !self.scope_mode {
+    fn scope_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let count = self.scope_albums.len() + self.scope_artists.len();
+        if count == 0 && !self.scope_mode {
             return div()
                 .flex()
                 .justify_end()
@@ -1623,13 +1623,17 @@ impl Root {
             .flex()
             .items_center()
             .gap_3()
-            .child(ui::muted_label(format!("已选 {count} {noun}")))
+            .child(ui::muted_label(if count == 0 {
+                "已选 0 项".to_owned()
+            } else {
+                format!("随机范围 {count} 项")
+            }))
             .child(div().flex_1())
             .child(ui::primary_button(
                 if self.scope_pending {
                     "准备中…"
                 } else {
-                    "随机播放选中"
+                    "随机播放范围"
                 },
                 count > 0 && !self.scope_pending,
                 cx.listener(|this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
@@ -1637,11 +1641,23 @@ impl Root {
                 }),
             ))
             .child(ui::ghost_button(
-                "scope-cancel",
-                "取消",
-                false,
+                "scope-mode",
+                if self.scope_mode {
+                    "完成多选"
+                } else {
+                    "多选"
+                },
+                self.scope_mode,
                 cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| this.toggle_scope_mode(cx)),
             ))
+            .when(count > 0, |bar| {
+                bar.child(ui::ghost_button(
+                    "scope-clear",
+                    "清空",
+                    false,
+                    cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| this.clear_scope(cx)),
+                ))
+            })
             .into_any_element()
     }
 
@@ -2015,8 +2031,6 @@ impl Root {
     fn select(&mut self, view: View, cx: &mut Context<Self>) {
         self.view = view;
         self.scope_mode = false;
-        self.scope_albums.clear();
-        self.scope_artists.clear();
         self.detail = None;
         self.artist_view = None;
         self.playlist_detail = None;
@@ -2354,7 +2368,7 @@ impl Root {
             .pb_8()
             .gap_3()
             .when(self.view == View::Albums, |view| {
-                view.child(self.scope_toolbar("张专辑", self.scope_albums.len(), cx))
+                view.child(self.scope_toolbar(cx))
             })
             .child(
                 uniform_list(
@@ -2928,6 +2942,9 @@ impl Root {
 
     fn detail_view(&self, album: &AlbumWithSongs, cx: &mut Context<Self>) -> impl IntoElement {
         let songs = self.song_list(SongSource::Album, cx);
+        let album_id = album.album.id.clone();
+        let album_name = album.album.name.clone();
+        let album_marked = self.scope_albums.iter().any(|(id, _)| id == &album_id);
 
         let play_all = {
             ui::primary_button(
@@ -2983,6 +3000,24 @@ impl Root {
                                             },
                                         ),
                                     ))
+                                    .child(ui::ghost_button(
+                                        "album-scope",
+                                        if album_marked {
+                                            "✓ 已标记"
+                                        } else {
+                                            "标记专辑"
+                                        },
+                                        album_marked,
+                                        cx.listener(
+                                            move |this: &mut Root, _: &ClickEvent, _, cx| {
+                                                this.toggle_album_scope(
+                                                    album_id.clone(),
+                                                    album_name.clone(),
+                                                    cx,
+                                                );
+                                            },
+                                        ),
+                                    ))
                                     .child(self.star_button(cx)),
                             ),
                     ),
@@ -2996,12 +3031,33 @@ impl Root {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let artist_id = artist.artist.id.clone();
+        let artist_name = artist.artist.name.clone();
+        let artist_marked = self.scope_artists.iter().any(|(id, _)| id == &artist_id);
         div()
             .flex()
             .flex_col()
             .gap_5()
             .child(back_button(cx))
-            .child(div().text_3xl().child(artist.artist.name.clone()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(div().text_3xl().child(artist.artist.name.clone()))
+                    .child(ui::ghost_button(
+                        "artist-scope",
+                        if artist_marked {
+                            "✓ 已标记"
+                        } else {
+                            "标记艺人"
+                        },
+                        artist_marked,
+                        cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                            this.toggle_artist_scope(artist_id.clone(), artist_name.clone(), cx);
+                        }),
+                    )),
+            )
             .child(if artist.album.is_empty() {
                 placeholder("这位艺人暂无专辑").into_any_element()
             } else {
@@ -3060,7 +3116,7 @@ impl Root {
             .flex()
             .flex_col()
             .gap_4()
-            .child(self.scope_toolbar("位艺人", self.scope_artists.len(), cx))
+            .child(self.scope_toolbar(cx))
             .child(list)
             .into_any_element()
     }
@@ -3091,6 +3147,7 @@ impl Root {
                         }),
                     ))),
             )
+            .child(self.scope_toolbar(cx))
             .child(results)
     }
 
@@ -3106,6 +3163,10 @@ impl Root {
             let mut artists = div().flex().flex_col().gap_1();
             for artist in &result.artist {
                 let id = artist.id.clone();
+                let name = artist.name.clone();
+                let mark_id = id.clone();
+                let mark_name = name.clone();
+                let marked = self.scope_artists.iter().any(|(artist, _)| artist == &id);
                 artists = artists.child(
                     div()
                         .id(format!("search-artist-{}", artist.id))
@@ -3117,7 +3178,37 @@ impl Root {
                         .rounded_md()
                         .cursor_pointer()
                         .hover(|style| style.bg(rgba(0xFFFFFF0A)))
-                        .child(div().text_sm().child(artist.name.clone()))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(div().text_sm().child(artist.name.clone()))
+                                .when(marked, |row| row.child(ui::muted_label("✓ 已标记"))),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(ui::muted_label(format!(
+                                    "{} 张专辑",
+                                    artist.album_count.unwrap_or(0)
+                                )))
+                                .child(ui::ghost_button(
+                                    format!("search-artist-scope-{}", artist.id),
+                                    if marked { "取消标记" } else { "标记" },
+                                    marked,
+                                    cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.toggle_artist_scope(
+                                            mark_id.clone(),
+                                            mark_name.clone(),
+                                            cx,
+                                        );
+                                    }),
+                                )),
+                        )
                         .on_click(cx.listener(
                             move |this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
                                 this.open_artist(id.clone(), cx);

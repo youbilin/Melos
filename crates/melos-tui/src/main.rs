@@ -65,6 +65,7 @@ struct App {
     title: String,
     selection: ListState,
     query: Option<String>,
+    query_artists: bool,
     status: String,
     browse_ticket: u64,
     lyrics_ticket: u64,
@@ -179,6 +180,7 @@ impl App {
             title: String::new(),
             selection: ListState::default().with_selected(Some(0)),
             query: None,
+            query_artists: false,
             status: "Connecting…".into(),
             browse_ticket: 0,
             lyrics_ticket: 0,
@@ -218,7 +220,7 @@ impl App {
         if page == Page::Albums && self.albums.is_empty() {
             self.request(Job::Albums(0));
         }
-        if page == Page::Artists && self.artists.is_empty() {
+        if page == Page::Artists {
             self.request(Job::Artists);
         }
     }
@@ -461,6 +463,12 @@ impl App {
                     self.artists = artists;
                     self.status.clear();
                 }
+                Ok(Data::ArtistSearch { artists, query }) => {
+                    self.artists = artists;
+                    self.page = Page::Artists;
+                    self.selection.select(Some(0));
+                    self.status = format!("搜索 “{query}”：{} 位艺人", self.artists.len());
+                }
                 Ok(Data::ScopeSongs(songs)) => {
                     if songs.is_empty() {
                         self.status = "所选专辑没有歌曲".into();
@@ -680,7 +688,11 @@ impl App {
                 KeyCode::Enter => {
                     let query = self.query.take().unwrap();
                     if !query.trim().is_empty() {
-                        self.request(Job::Search(query));
+                        if self.query_artists {
+                            self.request(Job::SearchArtists(query));
+                        } else {
+                            self.request(Job::Search(query));
+                        }
                     }
                 }
                 KeyCode::Char(ch)
@@ -699,7 +711,10 @@ impl App {
         match key.code {
             KeyCode::Char('q') => return true,
             KeyCode::Char('e') => self.reconnect_output(),
-            KeyCode::Char('/') => self.query = Some(String::new()),
+            KeyCode::Char('/') => {
+                self.query = Some(String::new());
+                self.query_artists = self.page == Page::Artists;
+            }
             KeyCode::Char('1') => self.page(Page::Albums),
             KeyCode::Esc => self.back(),
             KeyCode::Char('2') => self.page(Page::Playlists),
@@ -1143,7 +1158,11 @@ impl App {
             };
             format!("{field} · Enter next · Esc cancel")
         } else if let Some(query) = &self.query {
-            format!("Search: {query} · Enter submit · Esc cancel")
+            if self.query_artists {
+                format!("Search artists: {query} · Enter submit · Esc cancel")
+            } else {
+                format!("Search: {query} · Enter submit · Esc cancel")
+            }
         } else {
             format!(
                 "{}\nSpace pause · n/p skip · ←/→ seek · +/- volume · e audio · Esc back · q quit",
