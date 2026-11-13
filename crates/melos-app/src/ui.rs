@@ -540,6 +540,20 @@ pub fn primary_button(
 }
 
 /// A small muted label used in the sidebar footer and settings.
+pub fn empty_state(title: &'static str, hint: &'static str) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .h(px(200.))
+        .rounded_md()
+        .bg(rgba(0xFFFFFF08))
+        .child(div().text_sm().text_color(rgb(0xF5F5F7)).child(title))
+        .child(div().text_xs().text_color(rgb(0x9A9A9E)).child(hint))
+}
+
 pub fn muted_label(text: impl Into<SharedString>) -> impl IntoElement {
     div()
         .text_xs()

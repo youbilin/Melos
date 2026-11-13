@@ -35,7 +35,7 @@ const RANDOM_BATCH: u32 = 100;
 const SONG_ROW_HEIGHT: f32 = 76.0;
 const QUEUE_ROW_HEIGHT: f32 = 76.0;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum SongSource {
     Album,
     Library,
@@ -73,6 +73,14 @@ struct QueueDrag {
     index: usize,
     title: String,
     position: Point<Pixels>,
+}
+
+struct QueueResize;
+
+impl Render for QueueResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
 }
 
 impl Render for QueueDrag {
@@ -139,6 +147,10 @@ pub struct Root {
     playing: bool,
     queue_open: bool,
     queue_scroll: UniformListScrollHandle,
+    album_scroll: UniformListScrollHandle,
+    songs_scroll: UniformListScrollHandle,
+    list_cursor: Option<usize>,
+    queue_width: f32,
     search_results_generation: u64,
     volume: f32,
     slider_drag: Option<SliderDrag>,
@@ -270,6 +282,10 @@ impl Root {
             playing: false,
             queue_open: false,
             queue_scroll: UniformListScrollHandle::new(),
+            album_scroll: UniformListScrollHandle::new(),
+            songs_scroll: UniformListScrollHandle::new(),
+            list_cursor: None,
+            queue_width: QUEUE_WIDTH,
             search_results_generation: 0,
             volume,
             slider_drag: None,
@@ -557,6 +573,7 @@ impl Root {
                         .iter()
                         .filter_map(|album| album.cover_art.as_deref()),
                 );
+                self.list_cursor = None;
                 self.search_result = Some(*result);
                 self.search_results_generation = self.search_results_generation.wrapping_add(1);
             }
@@ -929,8 +946,9 @@ impl Root {
         .detach();
     }
 
-    fn sidebar_width(&self) -> f32 {
-        if self.sidebar_collapsed {
+    fn sidebar_width(&self, window: &Window) -> f32 {
+        let narrow = window.viewport_size().width.as_f32() < 960.0;
+        if self.sidebar_collapsed || narrow {
             SIDEBAR_COLLAPSED_WIDTH
         } else {
             SIDEBAR_WIDTH
@@ -1546,6 +1564,93 @@ impl Root {
         cx.notify();
     }
 
+    fn current_song_source(&self) -> Option<SongSource> {
+        if self.detail.is_some() {
+            Some(SongSource::Album)
+        } else if self.playlist_detail.is_some() {
+            Some(SongSource::Playlist)
+        } else if self.view == View::Songs {
+            Some(SongSource::Library)
+        } else {
+            None
+        }
+    }
+
+    fn list_len(&self) -> usize {
+        match self.view {
+            View::Home | View::Albums if self.detail.is_none() => self.albums.len(),
+            View::Artists if self.artist_view.is_none() => self.artists.len(),
+            View::Playlists if self.playlist_detail.is_none() => self.playlists.len(),
+            _ => self
+                .current_song_source()
+                .map(|source| self.source_songs(source).len())
+                .unwrap_or(0),
+        }
+    }
+
+    fn move_list_cursor(&mut self, delta: isize, window: &Window, cx: &mut Context<Self>) {
+        let len = self.list_len();
+        if len == 0 {
+            return;
+        }
+        let grid = matches!(self.view, View::Home | View::Albums) && self.detail.is_none();
+        let step = if grid {
+            grid_columns(
+                window,
+                self.queue_open,
+                self.sidebar_width(window),
+                self.queue_width,
+            )
+        } else {
+            1
+        };
+        let current = self.list_cursor.unwrap_or(0).min(len - 1);
+        let next = if delta < 0 {
+            current.saturating_sub(step)
+        } else {
+            (current + step).min(len - 1)
+        };
+        self.list_cursor = Some(next);
+        if grid {
+            self.album_scroll
+                .scroll_to_item(next / step.max(1), ScrollStrategy::Nearest);
+        } else if self.current_song_source().is_some() {
+            self.songs_scroll
+                .scroll_to_item(next, ScrollStrategy::Nearest);
+        }
+        cx.notify();
+    }
+
+    fn activate_list_cursor(&mut self, cx: &mut Context<Self>) {
+        let Some(index) = self.list_cursor else {
+            return;
+        };
+        if let Some(source) = self.current_song_source() {
+            if index < self.source_songs(source).len() {
+                self.play_source(source, index, cx);
+            }
+            return;
+        }
+        match self.view {
+            View::Home | View::Albums => {
+                if let Some(album) = self.albums.get(index) {
+                    self.open_album(album.id.clone(), cx);
+                }
+            }
+            View::Artists => {
+                if let Some(artist) = self.artists.get(index) {
+                    self.open_artist(artist.id.clone(), cx);
+                }
+            }
+            View::Playlists => {
+                if let Some(playlist) = self.playlists.get(index) {
+                    self.open_playlist(playlist.id.clone(), cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn toggle_scope_mode(&mut self, cx: &mut Context<Self>) {
         self.scope_mode = !self.scope_mode;
         cx.notify();
@@ -2032,6 +2137,7 @@ impl Root {
         self.view = view;
         self.scope_mode = false;
         self.detail = None;
+        self.list_cursor = None;
         self.artist_view = None;
         self.playlist_detail = None;
         self.requested_playlist = None;
@@ -2069,11 +2175,13 @@ impl Root {
     }
 
     fn open_album(&mut self, id: String, cx: &mut Context<Self>) {
+        self.list_cursor = None;
         self.api.send(Request::Album { id });
         cx.notify();
     }
 
     fn open_artist(&mut self, id: String, cx: &mut Context<Self>) {
+        self.list_cursor = None;
         self.api.send(Request::Artist { id });
         cx.notify();
     }
@@ -2133,7 +2241,7 @@ impl Root {
             .flex_1()
             .flex()
             .min_h_0()
-            .child(self.sidebar(cx))
+            .child(self.sidebar(window, cx))
             .child(
                 div()
                     .flex_1()
@@ -2167,7 +2275,8 @@ impl Root {
             .child(self.player_bar(cx))
     }
 
-    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let narrow = window.viewport_size().width.as_f32() < 960.0;
         let mut nav = div().flex().flex_col().gap_1();
 
         for view in [
@@ -2178,7 +2287,7 @@ impl Root {
             View::Playlists,
             View::Search,
         ] {
-            nav = nav.child(if self.sidebar_collapsed {
+            nav = nav.child(if self.sidebar_collapsed || narrow {
                 ui::icon_button(
                     view.label(),
                     view.icon(),
@@ -2204,7 +2313,7 @@ impl Root {
         div()
             .flex()
             .flex_col()
-            .w(px(self.sidebar_width()))
+            .w(px(self.sidebar_width(window)))
             .h_full()
             .flex_shrink_0()
             .px_3()
@@ -2378,12 +2487,28 @@ impl Root {
     }
 
     fn library_view(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let columns = grid_columns(window, self.queue_open, self.sidebar_width());
+        let columns = grid_columns(
+            window,
+            self.queue_open,
+            self.sidebar_width(window),
+            self.queue_width,
+        );
         let available = window.viewport_size().width.as_f32()
-            - self.sidebar_width()
+            - self.sidebar_width(window)
             - CONTENT_PADDING
-            - if self.queue_open { QUEUE_WIDTH } else { 0. };
+            - if self.queue_open {
+                self.queue_width
+            } else {
+                0.
+            };
         let card_width = ((available - CARD_GAP * (columns - 1) as f32) / columns as f32).max(80.);
+        if self.albums.is_empty() {
+            return if self.albums_loading {
+                skeleton_grid(columns)
+            } else {
+                ui::empty_state("暂无专辑", "连接服务器后会自动加载").into_any_element()
+            };
+        }
         let rows = self.albums.len().div_ceil(columns);
         div()
             .flex()
@@ -2441,7 +2566,8 @@ impl Root {
                 )
                 .flex_1()
                 .min_h_0()
-                .w_full(),
+                .w_full()
+                .track_scroll(&self.album_scroll),
             )
             .child(
                 div()
@@ -2484,6 +2610,7 @@ impl Root {
         self.playlist_editor = None;
         self.playlist_delete_confirm = false;
         self.error = None;
+        self.list_cursor = None;
         self.api.send_priority(Request::Playlist { id });
         cx.notify();
     }
@@ -2757,8 +2884,9 @@ impl Root {
             if self.playlists_loading {
                 view = view.child(ui::muted_label("加载中…"));
             }
-            for playlist in &self.playlists {
+            for (index, playlist) in self.playlists.iter().enumerate() {
                 let id = playlist.id.clone();
+                let focused = self.list_cursor == Some(index);
                 view = view.child(
                     div()
                         .id(format!("playlist-{id}"))
@@ -2768,6 +2896,7 @@ impl Root {
                         .rounded_md()
                         .cursor_pointer()
                         .hover(|style| style.bg(rgb(theme::HOVER)))
+                        .when(focused, |row| row.bg(rgba(0xFFFFFF10)))
                         .child(div().text_sm().child(playlist.name.clone()))
                         .child(ui::muted_label(format!(
                             "{} 首",
@@ -2779,7 +2908,7 @@ impl Root {
                 );
             }
             if self.playlists.is_empty() && !self.playlists_loading {
-                view = view.child(placeholder("暂无歌单，可以从当前队列新建"));
+                view = view.child(ui::empty_state("暂无歌单", "可以从当前队列新建歌单"));
             }
         }
         view
@@ -2856,6 +2985,11 @@ impl Root {
                                 .flex()
                                 .items_center()
                                 .gap_2()
+                                .when(
+                                    this.list_cursor == Some(index)
+                                        && this.current_song_source() == Some(source),
+                                    |row| row.bg(rgba(0xFFFFFF10)).rounded_md(),
+                                )
                                 .child(
                                     div()
                                         .flex_1()
@@ -2887,11 +3021,17 @@ impl Root {
         .flex_1()
         .min_h_0()
         .w_full()
+        .track_scroll(&self.songs_scroll)
         .into_any_element()
     }
 
     fn album_grid(&self, albums: &[Album], window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let columns = grid_columns(window, self.queue_open, self.sidebar_width());
+        let columns = grid_columns(
+            window,
+            self.queue_open,
+            self.sidebar_width(window),
+            self.queue_width,
+        );
 
         let mut cards = Vec::with_capacity(albums.len());
         for (index, album) in albums.iter().enumerate() {
@@ -2935,6 +3075,9 @@ impl Root {
         let name = album.name.clone();
         let artist = album.artist.clone().unwrap_or_default();
         let selected = self.scope_albums.iter().any(|(album, _)| album == &id);
+        let focused = self.list_cursor == Some(index)
+            && matches!(self.view, View::Home | View::Albums)
+            && self.detail.is_none();
 
         div()
             .id(format!("album-{}", album.id))
@@ -2953,6 +3096,7 @@ impl Root {
                     .child(artist),
             )
             .when(selected, |card| card.child(ui::muted_label("✓ 已选")))
+            .when(focused, |card| card.bg(rgba(0xFFFFFF10)).rounded_md())
             .on_click(
                 cx.listener(move |this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
                     if this.scope_mode {
@@ -3091,15 +3235,16 @@ impl Root {
 
     fn artists_view(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.artists.is_empty() {
-            return placeholder("暂无艺人").into_any_element();
+            return ui::empty_state("暂无艺人", "服务器返回艺人后会显示在这里").into_any_element();
         }
 
         let mut list = div().flex().flex_col().gap_1();
 
-        for artist in &self.artists {
+        for (index, artist) in self.artists.iter().enumerate() {
             let id = artist.id.clone();
             let name = artist.name.clone();
             let selected = self.scope_artists.iter().any(|(artist, _)| artist == &id);
+            let focused = self.list_cursor == Some(index) && self.artist_view.is_none();
             list = list.child(
                 div()
                     .id(format!("artist-{}", artist.id))
@@ -3112,11 +3257,29 @@ impl Root {
                     .cursor_pointer()
                     .hover(|style| style.bg(rgba(0xFFFFFF0A)))
                     .when(selected, |row| row.bg(rgba(0xFFFFFF12)))
+                    .when(focused, |row| row.bg(rgba(0xFFFFFF18)))
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_2()
+                            .child(
+                                div()
+                                    .size(px(28.))
+                                    .rounded_full()
+                                    .bg(rgba(0xFFFFFF14))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_xs()
+                                    .text_color(rgb(theme::TEXT))
+                                    .child(
+                                        name.chars()
+                                            .next()
+                                            .map(|ch| ch.to_uppercase().to_string())
+                                            .unwrap_or_else(|| "?".into()),
+                                    ),
+                            )
                             .child(div().text_sm().child(name.clone()))
                             .when(selected, |row| row.child(ui::muted_label("✓ 已选"))),
                     )
@@ -3445,7 +3608,11 @@ impl Root {
                         ))
                     }),
             )
-            .child(self.song_list(SongSource::Library, cx))
+            .child(if count == 0 && self.library_loading {
+                skeleton_rows(8)
+            } else {
+                self.song_list(SongSource::Library, cx)
+            })
             .into_any_element()
     }
 
@@ -3454,8 +3621,12 @@ impl Root {
             return div().flex_1().into_any_element();
         }
         let available = window.viewport_size().width.as_f32()
-            - self.sidebar_width()
-            - if self.queue_open { QUEUE_WIDTH } else { 0. }
+            - self.sidebar_width(window)
+            - if self.queue_open {
+                self.queue_width
+            } else {
+                0.
+            }
             - CONTENT_PADDING;
         let cover_width = (available * 0.35).clamp(120., 320.);
         let cover_id = self
@@ -3726,7 +3897,7 @@ impl Root {
             .flex()
             .flex_col()
             .gap_3()
-            .w(px(QUEUE_WIDTH))
+            .w(px(self.queue_width))
             .h_full()
             .min_h_0()
             .flex_shrink_0()
@@ -3734,6 +3905,25 @@ impl Root {
             .bg(rgba(0x0E0E12E6))
             .border_l_1()
             .border_color(rgb(theme::BORDER))
+            .child(
+                div()
+                    .id("queue-resize")
+                    .absolute()
+                    .left(px(-3.))
+                    .top_0()
+                    .h_full()
+                    .w(px(6.))
+                    .cursor(CursorStyle::ResizeLeftRight)
+                    .on_drag(QueueResize, |_, _, _, cx| cx.new(|_| QueueResize))
+                    .on_drag_move::<QueueResize>(cx.listener(
+                        |this: &mut Root, event: &DragMoveEvent<QueueResize>, window, cx| {
+                            let width = window.viewport_size().width.as_f32()
+                                - event.event.position.x.as_f32();
+                            this.queue_width = width.clamp(260.0, 620.0);
+                            cx.notify();
+                        },
+                    )),
+            )
             .child(
                 div()
                     .flex()
@@ -3904,6 +4094,26 @@ impl Render for Root {
                     }
                     cx.stop_propagation();
                     return;
+                }
+                if !editing && !composing {
+                    match event.keystroke.key.as_str() {
+                        "up" if !event.keystroke.modifiers.control => {
+                            this.move_list_cursor(-1, window, cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                        "down" if !event.keystroke.modifiers.control => {
+                            this.move_list_cursor(1, window, cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                        "enter" if !event.prefer_character_input && this.list_cursor.is_some() => {
+                            this.activate_list_cursor(cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                        _ => {}
+                    }
                 }
                 if event.keystroke.key != "enter" || event.prefer_character_input {
                     return;
@@ -4140,6 +4350,78 @@ fn guess_image_format(bytes: &[u8]) -> Option<ImageFormat> {
     }
 }
 
+fn skeleton_grid(columns: usize) -> AnyElement {
+    div()
+        .grid()
+        .grid_cols(columns as u16)
+        .gap_6()
+        .w_full()
+        .children((0..columns * 3).map(|_| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .w_full()
+                        .aspect_ratio(1.0)
+                        .rounded_md()
+                        .bg(rgba(0xFFFFFF0A)),
+                )
+                .child(
+                    div()
+                        .h(px(12.))
+                        .w(px(120.))
+                        .rounded_md()
+                        .bg(rgba(0xFFFFFF0A)),
+                )
+                .child(
+                    div()
+                        .h(px(10.))
+                        .w(px(80.))
+                        .rounded_md()
+                        .bg(rgba(0xFFFFFF08)),
+                )
+        }))
+        .into_any_element()
+}
+fn skeleton_rows(count: usize) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .children((0..count).map(|_| {
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .h(px(SONG_ROW_HEIGHT))
+                .px_3()
+                .child(
+                    div()
+                        .h(px(12.))
+                        .w(px(24.))
+                        .rounded_md()
+                        .bg(rgba(0xFFFFFF0A)),
+                )
+                .child(
+                    div()
+                        .h(px(12.))
+                        .w(px(180.))
+                        .rounded_md()
+                        .bg(rgba(0xFFFFFF0A)),
+                )
+                .child(
+                    div()
+                        .h(px(10.))
+                        .w(px(90.))
+                        .rounded_md()
+                        .bg(rgba(0xFFFFFF08)),
+                )
+        }))
+        .into_any_element()
+}
+
 fn placeholder(message: &'static str) -> impl IntoElement {
     div()
         .flex()
@@ -4155,9 +4437,9 @@ fn placeholder(message: &'static str) -> impl IntoElement {
 
 /// Picks a column count from the window width so the grid always fills the
 /// content area instead of leaving a strip of empty space on the right.
-fn grid_columns(window: &Window, queue_open: bool, sidebar_width: f32) -> usize {
+fn grid_columns(window: &Window, queue_open: bool, sidebar_width: f32, queue_width: f32) -> usize {
     let width = window.viewport_size().width.as_f32();
-    let reserved = sidebar_width + if queue_open { QUEUE_WIDTH } else { 0.0 } + CONTENT_PADDING;
+    let reserved = sidebar_width + if queue_open { queue_width } else { 0.0 } + CONTENT_PADDING;
     let available = (width - reserved).max(CARD_MIN);
     (((available + CARD_GAP) / (CARD_MIN + CARD_GAP)).floor() as usize).clamp(1, 10)
 }
