@@ -23,6 +23,10 @@ try {
     $binary = Join-Path $repoRoot 'target/release/melos.exe'
     if (-not (Test-Path -LiteralPath $binary)) { throw 'Release binary does not exist.' }
     $version = (Get-Item -LiteralPath $binary).VersionInfo.ProductVersion
+    $workspaceVersion = [regex]::Match([IO.File]::ReadAllText((Join-Path $repoRoot 'Cargo.toml')), '(?ms)^\[workspace\.package\]\s*\nversion\s*=\s*"([^"]+)"').Groups[1].Value
+    if (-not $workspaceVersion -or $version -ne $workspaceVersion) {
+        throw 'The Windows binary resource version does not match the workspace version. Rebuild with matching resources before packaging.'
+    }
     $outputDir = Join-Path $repoRoot 'output/release'
     $stage = Join-Path $repoRoot ('output/package-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force $outputDir, $stage | Out-Null

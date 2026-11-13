@@ -1,4 +1,4 @@
-Melos 0.1.5 — development preview
+Melos 0.1.6 — development preview
 
 Extract this folder and run melos.exe on Windows 10 (1903+)/11 (x64).
 For terminal playback, first save a connection in the desktop app, then
@@ -15,12 +15,12 @@ Supported local decoders: WAV, FLAC, MP3, AAC/ALAC and Vorbis.
 Other formats request server-side MP3 transcoding. Range seeking and
 automatic resume require a server that supports byte ranges.
 
-Playback bar: shuffle, repeat off/all/one, Lyrics and Queue.
+The sidebar can collapse to icons. Playback modes use shuffle and repeat icons.
 Queue entries support next-play insertion, append, removal and reordering.
 Song lists and queues render visible rows; use Locate current in the queue
 to return to the active track in a long list.
 Playlists support browse/play/create/append/remove/rename/confirmed delete.
-Lyrics support timed highlighting, following, line seeking and plain text.
+Lyrics show an artwork card and centered timed lines, line seeking and plain text.
 Windows system media controls receive the current song's cached cover image.
 Space toggles playback; arrows seek 5 seconds; Ctrl+arrows switch tracks
 or adjust volume. Ctrl+S/R/Q/F control shuffle/repeat/queue/search.

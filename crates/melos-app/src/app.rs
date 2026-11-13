@@ -24,6 +24,7 @@ use crate::theme;
 use crate::ui::{self, input::TextInput};
 
 const SIDEBAR_WIDTH: f32 = 216.0;
+const SIDEBAR_COLLAPSED_WIDTH: f32 = 64.0;
 const QUEUE_WIDTH: f32 = 340.0;
 const CONTENT_PADDING: f32 = 64.0;
 const CARD_MIN: f32 = 160.0;
@@ -105,15 +106,15 @@ impl View {
         }
     }
 
-    fn subtitle(self) -> &'static str {
+    fn icon(self) -> ui::Icon {
         match self {
-            Self::Home => "最近添加与常听",
-            Self::Artists => "按艺人浏览",
-            Self::Albums => "全部专辑",
-            Self::Playlists => "你的歌单",
-            Self::Search => "搜索艺人、专辑与歌曲",
-            Self::Lyrics => "跟随当前播放",
-            Self::Settings => "连接与播放偏好",
+            Self::Home => ui::Icon::Home,
+            Self::Artists => ui::Icon::Artist,
+            Self::Albums => ui::Icon::Album,
+            Self::Playlists => ui::Icon::Playlist,
+            Self::Search => ui::Icon::Search,
+            Self::Lyrics => ui::Icon::Lyrics,
+            Self::Settings => ui::Icon::Settings,
         }
     }
 }
@@ -122,6 +123,7 @@ pub struct Root {
     focus_handle: FocusHandle,
     api: ApiWorker,
     view: View,
+    sidebar_collapsed: bool,
     playing: bool,
     queue_open: bool,
     queue_scroll: UniformListScrollHandle,
@@ -225,6 +227,7 @@ impl Root {
             focus_handle: cx.focus_handle(),
             api: ApiWorker::new(),
             view: View::Home,
+            sidebar_collapsed: false,
             playing: false,
             queue_open: false,
             queue_scroll: UniformListScrollHandle::new(),
@@ -657,8 +660,26 @@ impl Root {
             if self.lyrics_follow
                 && let Some(index) = active
             {
-                self.lyrics_scroll.scroll_to_item(index);
+                self.center_lyrics(index);
             }
+        }
+    }
+
+    fn center_lyrics(&self, index: usize) {
+        let viewport = self.lyrics_scroll.bounds();
+        if let Some(line) = self.lyrics_scroll.bounds_for_item(index)
+            && viewport.size.height > px(0.)
+        {
+            self.lyrics_scroll
+                .set_offset(point(px(0.), viewport.center().y - line.center().y));
+        }
+    }
+
+    fn sidebar_width(&self) -> f32 {
+        if self.sidebar_collapsed {
+            SIDEBAR_COLLAPSED_WIDTH
+        } else {
+            SIDEBAR_WIDTH
         }
     }
 
@@ -806,9 +827,6 @@ impl Root {
                     .flex_col()
                     .gap_2()
                     .child(choices)
-                    .child(ui::muted_label(
-                        "设置用于下一次开始的播放；无法本地解码的格式自动转为 MP3。",
-                    ))
                     .into_any_element(),
             ))
             .child(section(
@@ -817,9 +835,6 @@ impl Root {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(ui::muted_label(
-                        "设备断开后可重新连接；保留歌曲、队列和进度，恢复后保持暂停。",
-                    ))
                     .child(ui::ghost_button(
                         "reconnect-output",
                         "重新连接音频输出",
@@ -840,24 +855,6 @@ impl Root {
                         "{}%",
                         (self.volume * 100.0).round() as u32
                     )))
-                    .into_any_element(),
-            ))
-            .child(section(
-                "快捷键",
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(ui::muted_label("空格：播放/暂停　← / →：后退/前进 5 秒"))
-                    .child(ui::muted_label(
-                        "Ctrl+← / →：上一首/下一首　Ctrl+↑ / ↓：音量 ±5%",
-                    ))
-                    .child(ui::muted_label(
-                        "Ctrl+S：随机　Ctrl+R：循环　Ctrl+Q：队列　Ctrl+F：搜索",
-                    ))
-                    .child(ui::muted_label(
-                        "输入框内保留输入和编辑按键；中文输入法组合期间不触发播放快捷键。",
-                    ))
                     .into_any_element(),
             ))
     }
@@ -1538,7 +1535,6 @@ impl Root {
                     .border_1()
                     .border_color(rgb(theme::BORDER))
                     .child(div().text_2xl().child("连接服务器"))
-                    .child(ui::muted_label("Navidrome 或其他 OpenSubsonic 服务"))
                     .child(field("服务器地址", &self.server))
                     .child(field("用户名", &self.username))
                     .child(field("密码", &self.password))
@@ -1567,7 +1563,7 @@ impl Root {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(self.header())
+                    .when(self.view != View::Lyrics, |body| body.child(self.header()))
                     .child(self.body(window, cx)),
             );
 
@@ -1602,20 +1598,33 @@ impl Root {
             View::Playlists,
             View::Search,
         ] {
-            nav = nav.child(ui::ghost_button(
-                view.label(),
-                view.label(),
-                self.view == view,
-                cx.listener(move |this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
-                    this.select(view, cx);
-                }),
-            ));
+            nav = nav.child(if self.sidebar_collapsed {
+                ui::icon_button(
+                    view.label(),
+                    view.icon(),
+                    self.view == view,
+                    cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                        this.select(view, cx);
+                    }),
+                )
+                .into_any_element()
+            } else {
+                ui::ghost_button(
+                    view.label(),
+                    view.label(),
+                    self.view == view,
+                    cx.listener(move |this: &mut Root, _: &ClickEvent, _, cx| {
+                        this.select(view, cx);
+                    }),
+                )
+                .into_any_element()
+            });
         }
 
         div()
             .flex()
             .flex_col()
-            .w(px(SIDEBAR_WIDTH))
+            .w(px(self.sidebar_width()))
             .h_full()
             .flex_shrink_0()
             .px_3()
@@ -1625,6 +1634,19 @@ impl Root {
             .bg(rgba(0x0A0A0ACC))
             .border_r_1()
             .border_color(rgb(theme::BORDER))
+            .child(ui::icon_button(
+                "toggle-sidebar",
+                if self.sidebar_collapsed {
+                    ui::Icon::SidebarExpand
+                } else {
+                    ui::Icon::SidebarCollapse
+                },
+                false,
+                cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                    this.sidebar_collapsed = !this.sidebar_collapsed;
+                    cx.notify();
+                }),
+            ))
             .child(nav)
             .child(div().flex_1())
             .child(
@@ -1632,35 +1654,31 @@ impl Root {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(ui::ghost_button(
-                        "settings",
-                        View::Settings.label(),
-                        self.view == View::Settings,
-                        cx.listener(|this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
-                            this.select(View::Settings, cx);
-                        }),
-                    ))
-                    .child(ui::muted_label(concat!(
-                        "melos v",
-                        env!("CARGO_PKG_VERSION")
-                    ))),
+                    .child(if self.sidebar_collapsed {
+                        ui::icon_button(
+                            "settings",
+                            ui::Icon::Settings,
+                            self.view == View::Settings,
+                            cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                                this.select(View::Settings, cx)
+                            }),
+                        )
+                        .into_any_element()
+                    } else {
+                        ui::ghost_button(
+                            "settings",
+                            View::Settings.label(),
+                            self.view == View::Settings,
+                            cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                                this.select(View::Settings, cx)
+                            }),
+                        )
+                        .into_any_element()
+                    }),
             )
     }
 
     fn header(&self) -> impl IntoElement {
-        let status = match &self.server_info {
-            Some(info) => format!(
-                "{} {}",
-                if info.server_type.is_empty() {
-                    "subsonic"
-                } else {
-                    &info.server_type
-                },
-                info.server_version.as_deref().unwrap_or("")
-            ),
-            None => "未连接".to_owned(),
-        };
-
         div()
             .flex()
             .items_end()
@@ -1673,15 +1691,13 @@ impl Root {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().text_3xl().child(self.view.label()))
-                    .child(ui::muted_label(self.view.subtitle())),
+                    .child(div().text_3xl().child(self.view.label())),
             )
-            .child(ui::muted_label(status))
     }
 
     fn body(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         if self.view == View::Lyrics {
-            return self.lyrics_view(cx);
+            return self.lyrics_view(window, cx);
         }
         if let Some(detail) = &self.detail {
             return div()
@@ -1744,9 +1760,9 @@ impl Root {
     }
 
     fn library_view(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let columns = grid_columns(window, self.queue_open);
+        let columns = grid_columns(window, self.queue_open, self.sidebar_width());
         let available = window.viewport_size().width.as_f32()
-            - SIDEBAR_WIDTH
+            - self.sidebar_width()
             - CONTENT_PADDING
             - if self.queue_open { QUEUE_WIDTH } else { 0. };
         let card_width = ((available - CARD_GAP * (columns - 1) as f32) / columns as f32).max(80.);
@@ -1814,10 +1830,6 @@ impl Root {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(ui::muted_label(format!(
-                        "已加载 {} 张专辑",
-                        self.albums.len()
-                    )))
                     .when(self.albums_more, |bar| {
                         bar.child(ui::ghost_button(
                             "load-more-albums",
@@ -1934,18 +1946,12 @@ impl Root {
 
     fn playlists_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut view = div().flex().flex_col().gap_4();
-        if let Some(editor) = self.playlist_editor {
+        if self.playlist_editor.is_some() {
             view = view.child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(ui::muted_label(match editor {
-                        PlaylistEditor::Create => {
-                            "新歌单使用当前队列中的歌曲；空队列会创建空歌单。"
-                        }
-                        PlaylistEditor::Rename => "更改歌单名称",
-                    }))
                     .child(self.playlist_name.clone())
                     .child(
                         div()
@@ -2080,11 +2086,6 @@ impl Root {
                         ))
                     }),
             );
-            if self.playlist_delete_confirm {
-                view = view.child(ui::muted_label(
-                    "再次点击确认删除歌单，歌曲文件会保留。返回歌单列表可取消。",
-                ));
-            }
             view = view
                 .flex_1()
                 .min_h_0()
@@ -2270,7 +2271,7 @@ impl Root {
     }
 
     fn album_grid(&self, albums: &[Album], window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let columns = grid_columns(window, self.queue_open);
+        let columns = grid_columns(window, self.queue_open, self.sidebar_width());
 
         let mut cards = Vec::with_capacity(albums.len());
         for (index, album) in albums.iter().enumerate() {
@@ -2546,7 +2547,7 @@ impl Root {
             .now_playing
             .as_ref()
             .and_then(|song| song.artist.clone())
-            .unwrap_or_else(|| "选择一首歌开始".into());
+            .unwrap_or_default();
         let cover_id = self
             .playing_cover_ids
             .iter()
@@ -2621,22 +2622,21 @@ impl Root {
             .child(
                 div()
                     .flex()
-                    .flex_col()
+                    .items_center()
                     .gap_1()
-                    .child(ui::compact_button(
+                    .child(ui::icon_button(
                         "shuffle",
-                        "随机",
+                        ui::Icon::Shuffle,
                         self.queue.shuffle(),
                         cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
                             this.toggle_shuffle(cx);
                         }),
                     ))
-                    .child(ui::compact_button(
+                    .child(ui::icon_button(
                         "repeat",
                         match self.queue.repeat() {
-                            RepeatMode::Off => "循环关",
-                            RepeatMode::All => "列表循环",
-                            RepeatMode::One => "单曲循环",
+                            RepeatMode::Off | RepeatMode::All => ui::Icon::Repeat,
+                            RepeatMode::One => ui::Icon::RepeatOne,
                         },
                         self.queue.repeat() != RepeatMode::Off,
                         cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
@@ -2664,7 +2664,6 @@ impl Root {
                     .items_center()
                     .gap_2()
                     .w(px(120.))
-                    .child(ui::muted_label("VOL"))
                     .child(self.volume_slider(cx)),
             )
             .child(
@@ -2699,63 +2698,44 @@ impl Root {
             )
     }
 
-    fn lyrics_view(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(song) = self.now_playing.as_ref() else {
-            return placeholder("选择一首歌曲查看歌词").into_any_element();
-        };
-        let mut content = div()
-            .flex_1()
-            .min_h_0()
+    fn lyrics_view(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.now_playing.is_none() {
+            return div().flex_1().into_any_element();
+        }
+        let available = window.viewport_size().width.as_f32()
+            - self.sidebar_width()
+            - if self.queue_open { QUEUE_WIDTH } else { 0. }
+            - CONTENT_PADDING;
+        let cover_width = (available * 0.35).clamp(120., 320.);
+        let cover_id = self
+            .playing_cover_ids
+            .iter()
+            .find(|id| self.covers.contains_key(*id))
+            .or_else(|| self.playing_cover_ids.first())
+            .map(String::as_str);
+        let mut artwork = div()
+            .w(px(cover_width))
+            .h_full()
+            .flex_shrink_0()
             .flex()
             .flex_col()
-            .px_8()
-            .pb_8()
-            .gap_4()
-            .child(div().text_lg().child(song.title.clone()))
-            .child(ui::muted_label(song.artist.clone().unwrap_or_default()));
-        if self.lyrics_loading {
-            return content
-                .child(placeholder("正在加载歌词…"))
-                .into_any_element();
-        }
-        if let Some(error) = self.lyrics_error.as_ref() {
-            return content
-                .child(ui::muted_label(format!("歌词加载失败：{error}")))
-                .child(ui::ghost_button(
-                    "retry-lyrics",
-                    "重试",
-                    false,
-                    cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
-                        if let Some(song) = this.now_playing.clone() {
-                            this.request_lyrics(&song);
-                        }
-                        cx.notify();
-                    }),
-                ))
-                .into_any_element();
-        }
-        let Some(lyrics) = self.lyrics.get(self.lyrics_track) else {
-            return content.child(placeholder("暂无歌词")).into_any_element();
-        };
-        let mut controls =
-            div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .child(ui::muted_label(if lyrics.synced {
-                    "同步歌词 · 点击行跳转"
-                } else {
-                    "纯文本歌词"
-                }));
+            .justify_center()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .size(px(cover_width))
+                    .rounded_lg()
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(rgb(theme::BORDER))
+                    .shadow_lg()
+                    .child(self.cover(cover_id, 0)),
+            );
         if self.lyrics.len() > 1 {
-            controls = controls.child(ui::ghost_button(
+            artwork = artwork.child(ui::icon_button(
                 "lyrics-language",
-                format!(
-                    "{} · {}/{}",
-                    lyrics.language.as_deref().unwrap_or("歌词"),
-                    self.lyrics_track + 1,
-                    self.lyrics.len()
-                ),
+                ui::Icon::Lyrics,
                 false,
                 cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
                     this.lyrics_track = (this.lyrics_track + 1) % this.lyrics.len();
@@ -2766,48 +2746,75 @@ impl Root {
                 }),
             ));
         }
-        if lyrics.synced {
-            controls = controls.child(ui::ghost_button(
-                "lyrics-follow",
-                "跟随播放",
-                self.lyrics_follow,
-                cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
-                    this.lyrics_follow = !this.lyrics_follow;
-                    if this.lyrics_follow
-                        && let Some(index) = this.lyrics_active
-                    {
-                        this.lyrics_scroll.scroll_to_item(index);
-                    }
-                    cx.notify();
-                }),
-            ));
+        let content = div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .px_8()
+            .py_8()
+            .gap_6()
+            .overflow_hidden()
+            .child(artwork);
+        if self.lyrics_loading {
+            return content.into_any_element();
         }
-        content = content.child(controls);
+        if self.lyrics_error.is_some() {
+            return content
+                .child(div().flex_1().flex().items_center().justify_center().child(
+                    ui::ghost_button(
+                        "retry-lyrics",
+                        "重试歌词",
+                        false,
+                        cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                            if let Some(song) = this.now_playing.clone() {
+                                this.request_lyrics(&song);
+                            }
+                            cx.notify();
+                        }),
+                    ),
+                ))
+                .into_any_element();
+        }
+        let Some(lyrics) = self.lyrics.get(self.lyrics_track) else {
+            return content.into_any_element();
+        };
         let active = lyrics.active_range(self.position_ms);
+        let height = (window.viewport_size().height.as_f32() - 76. - 64.).max(64.);
+        // Space before/after the lyrics lets the first and last line also center.
+        let padding = (height - 64.) / 2.;
         let mut lines = div()
             .id("lyrics-scroll")
             .flex_1()
             .min_h_0()
+            .min_w_0()
             .overflow_y_scroll()
             .track_scroll(&self.lyrics_scroll)
             .flex()
             .flex_col()
-            .gap_2();
+            .pt(px(padding))
+            .pb(px(padding));
         for (index, line) in lyrics.lines.iter().enumerate() {
             let start = line.start_ms;
             lines = lines.child(
                 div()
                     .id(format!("lyric-line-{index}"))
                     .flex_shrink_0()
+                    .min_h(px(64.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .p_3()
                     .rounded_md()
-                    .text_lg()
+                    .text_2xl()
+                    .text_center()
                     .text_color(rgb(if active.contains(&index) {
                         theme::TEXT
                     } else {
                         theme::TEXT_MUTED
                     }))
-                    .when(active.contains(&index), |style| style.bg(rgba(0xFFFFFF14)))
+                    .when(active.contains(&index), |style| {
+                        style.font_weight(FontWeight::SEMIBOLD)
+                    })
                     .when(start.is_some(), |style| {
                         style
                             .cursor_pointer()
@@ -2875,11 +2882,6 @@ impl Root {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .child(ui::muted_label(if current {
-                        "正在播放"
-                    } else {
-                        "拖动排序"
-                    }))
                     .child(div().flex_1())
                     .when(index > 0, |row| {
                         row.child(ui::ghost_button(
@@ -3011,6 +3013,12 @@ impl Root {
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.view == View::Lyrics
+            && self.lyrics_follow
+            && let Some(index) = self.lyrics_active
+        {
+            self.center_lyrics(index);
+        }
         if window.focused(cx).is_none() {
             window.focus(&self.focus_handle, cx);
         }
@@ -3213,8 +3221,9 @@ fn back_button(cx: &mut Context<Root>) -> impl IntoElement {
         "← 返回",
         false,
         cx.listener(|this: &mut Root, _: &ClickEvent, _: &mut Window, cx| {
-            this.detail = None;
-            this.artist_view = None;
+            if this.detail.take().is_none() {
+                this.artist_view = None;
+            }
             cx.notify();
         }),
     )
@@ -3386,9 +3395,9 @@ fn placeholder(message: &'static str) -> impl IntoElement {
 
 /// Picks a column count from the window width so the grid always fills the
 /// content area instead of leaving a strip of empty space on the right.
-fn grid_columns(window: &Window, queue_open: bool) -> usize {
+fn grid_columns(window: &Window, queue_open: bool, sidebar_width: f32) -> usize {
     let width = window.viewport_size().width.as_f32();
-    let reserved = SIDEBAR_WIDTH + if queue_open { QUEUE_WIDTH } else { 0.0 } + CONTENT_PADDING;
+    let reserved = sidebar_width + if queue_open { QUEUE_WIDTH } else { 0.0 } + CONTENT_PADDING;
     let available = (width - reserved).max(CARD_MIN);
     (((available + CARD_GAP) / (CARD_MIN + CARD_GAP)).floor() as usize).clamp(1, 10)
 }

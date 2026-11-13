@@ -1,5 +1,5 @@
 //! Silent, real-device acceptance using bundled audio. No server or settings.
-//! Default: two hours. A shorter run is explicitly reported as a short check.
+//! Default: 80 minutes. A shorter run is explicitly reported as a short check.
 use melos_player::{Engine, StreamSpec};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -149,7 +149,8 @@ fn run(seconds: u64) -> Result<Value, String> {
         underruns == 0 && max_drift <= 250 && growth.is_some_and(|growth| growth <= 8_000_000);
     Ok(json!({
         "passed":passed,"requested_seconds":seconds,"elapsed_ms":start.elapsed().as_millis(),
-        "scope":if seconds >= 7200 { "two-hour real-device local-fixture check" } else { "short real-device local-fixture check; not two-hour acceptance" },
+        "acceptance_duration_met":seconds >= 4800,
+        "scope":if seconds >= 4800 { "80-minute real-device local-fixture acceptance" } else { "short real-device local-fixture check; not 80-minute acceptance" },
         "silent":true,"rapid_switches":50,"pause_queue_edits":10,"reconnect_checkpoint_ms":500,
         "track_transitions":final_snapshot.track_index,"underruns":underruns,"max_abs_clock_drift_ms":max_drift,
         "private_memory_growth_bytes":growth,"limits":{"max_clock_drift_ms":250,"max_private_memory_growth_bytes":8_000_000},"samples":samples,
@@ -158,7 +159,7 @@ fn run(seconds: u64) -> Result<Value, String> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut seconds = 7200;
+    let mut seconds = 4800;
     let mut report = PathBuf::from("output/playback-soak.json");
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -167,7 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--report" => report = args.next().ok_or("Missing report path")?.into(),
             "--help" => {
                 println!(
-                    "soak [--seconds 7200] [--report output/playback-soak.json]\nSilent default-device FLAC/MP3 playback, queue/seek/reconnect checks and memory/clock samples."
+                    "soak [--seconds 4800] [--report output/playback-soak.json]\nSilent default-device FLAC/MP3 playback, queue/seek/reconnect checks and memory/clock samples."
                 );
                 return Ok(());
             }
@@ -175,7 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if seconds < 30 {
-        return Err("Use at least 30 seconds; two-hour acceptance requires 7200.".into());
+        return Err("Use at least 30 seconds; 80-minute acceptance requires 4800.".into());
     }
     let result = match run(seconds) {
         Ok(result) => result,

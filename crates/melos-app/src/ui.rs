@@ -14,6 +14,52 @@ pub enum Icon {
     Pause,
     Next,
     Prev,
+    Shuffle,
+    Repeat,
+    RepeatOne,
+    Home,
+    Artist,
+    Album,
+    Playlist,
+    Search,
+    Lyrics,
+    Settings,
+    SidebarExpand,
+    SidebarCollapse,
+}
+
+pub fn icon_button(
+    id: impl Into<ElementId>,
+    icon: Icon,
+    selected: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let color = rgb(if selected {
+        theme::TEXT
+    } else {
+        theme::TEXT_MUTED
+    });
+    div()
+        .id(id)
+        .size(px(36.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .cursor_pointer()
+        .when(selected, |style| style.bg(rgba(0xFFFFFF14)))
+        .hover(|style| style.bg(rgba(0xFFFFFF0A)))
+        .child(
+            canvas(
+                move |_, _, _| {},
+                move |bounds, _, window, _| {
+                    paint_icon(icon, bounds, color, window);
+                },
+            )
+            .size(px(20.)),
+        )
+        .on_click(on_click)
 }
 
 /// A flat text button used for nav entries and player controls.
@@ -174,6 +220,229 @@ fn paint_icon(icon: Icon, bounds: Bounds<Pixels>, color: Rgba, window: &mut Wind
                 window,
             );
         }
+        Icon::Shuffle => {
+            stroke(
+                &[
+                    at(0.12, 0.24),
+                    at(0.30, 0.24),
+                    at(0.70, 0.76),
+                    at(0.88, 0.76),
+                ],
+                color,
+                window,
+            );
+            stroke(
+                &[
+                    at(0.12, 0.76),
+                    at(0.30, 0.76),
+                    at(0.70, 0.24),
+                    at(0.88, 0.24),
+                ],
+                color,
+                window,
+            );
+            stroke(
+                &[at(0.72, 0.10), at(0.88, 0.24), at(0.72, 0.38)],
+                color,
+                window,
+            );
+            stroke(
+                &[at(0.72, 0.62), at(0.88, 0.76), at(0.72, 0.90)],
+                color,
+                window,
+            );
+        }
+        Icon::Repeat | Icon::RepeatOne => {
+            stroke(
+                &[
+                    at(0.12, 0.46),
+                    at(0.12, 0.28),
+                    at(0.22, 0.18),
+                    at(0.86, 0.18),
+                ],
+                color,
+                window,
+            );
+            stroke(
+                &[
+                    at(0.88, 0.54),
+                    at(0.88, 0.72),
+                    at(0.78, 0.82),
+                    at(0.14, 0.82),
+                ],
+                color,
+                window,
+            );
+            stroke(
+                &[at(0.72, 0.04), at(0.86, 0.18), at(0.72, 0.32)],
+                color,
+                window,
+            );
+            stroke(
+                &[at(0.28, 0.68), at(0.14, 0.82), at(0.28, 0.96)],
+                color,
+                window,
+            );
+            if icon == Icon::RepeatOne {
+                stroke(
+                    &[at(0.42, 0.43), at(0.52, 0.37), at(0.52, 0.64)],
+                    color,
+                    window,
+                );
+            }
+        }
+        Icon::Home => {
+            stroke(
+                &[at(0.10, 0.44), at(0.50, 0.10), at(0.90, 0.44)],
+                color,
+                window,
+            );
+            stroke(
+                &[
+                    at(0.22, 0.34),
+                    at(0.22, 0.88),
+                    at(0.78, 0.88),
+                    at(0.78, 0.34),
+                ],
+                color,
+                window,
+            );
+        }
+        Icon::Artist => {
+            stroke(
+                &[
+                    at(0.38, 0.14),
+                    at(0.62, 0.14),
+                    at(0.68, 0.28),
+                    at(0.62, 0.42),
+                    at(0.38, 0.42),
+                    at(0.32, 0.28),
+                    at(0.38, 0.14),
+                ],
+                color,
+                window,
+            );
+            stroke(
+                &[
+                    at(0.14, 0.90),
+                    at(0.20, 0.64),
+                    at(0.36, 0.54),
+                    at(0.64, 0.54),
+                    at(0.80, 0.64),
+                    at(0.86, 0.90),
+                ],
+                color,
+                window,
+            );
+        }
+        Icon::Album => {
+            stroke(
+                &[
+                    at(0.28, 0.10),
+                    at(0.72, 0.10),
+                    at(0.90, 0.28),
+                    at(0.90, 0.72),
+                    at(0.72, 0.90),
+                    at(0.28, 0.90),
+                    at(0.10, 0.72),
+                    at(0.10, 0.28),
+                    at(0.28, 0.10),
+                ],
+                color,
+                window,
+            );
+            stroke(
+                &[
+                    at(0.42, 0.38),
+                    at(0.58, 0.38),
+                    at(0.62, 0.50),
+                    at(0.58, 0.62),
+                    at(0.42, 0.62),
+                    at(0.38, 0.50),
+                    at(0.42, 0.38),
+                ],
+                color,
+                window,
+            );
+        }
+        Icon::Playlist | Icon::Lyrics => {
+            for y in [0.24, 0.50, 0.76] {
+                stroke(&[at(0.14, y), at(0.86, y)], color, window);
+            }
+        }
+        Icon::Search => {
+            stroke(
+                &[
+                    at(0.22, 0.12),
+                    at(0.54, 0.12),
+                    at(0.68, 0.26),
+                    at(0.68, 0.54),
+                    at(0.54, 0.68),
+                    at(0.22, 0.68),
+                    at(0.08, 0.54),
+                    at(0.08, 0.26),
+                    at(0.22, 0.12),
+                ],
+                color,
+                window,
+            );
+            stroke(&[at(0.62, 0.62), at(0.90, 0.90)], color, window);
+        }
+        Icon::Settings => {
+            for (x, y) in [(0.24, 0.36), (0.50, 0.66), (0.76, 0.30)] {
+                stroke(&[at(x, 0.10), at(x, y - 0.08)], color, window);
+                stroke(&[at(x, y + 0.08), at(x, 0.90)], color, window);
+                stroke(
+                    &[
+                        at(x - 0.09, y - 0.08),
+                        at(x + 0.09, y - 0.08),
+                        at(x + 0.09, y + 0.08),
+                        at(x - 0.09, y + 0.08),
+                        at(x - 0.09, y - 0.08),
+                    ],
+                    color,
+                    window,
+                );
+            }
+        }
+        Icon::SidebarExpand | Icon::SidebarCollapse => {
+            stroke(
+                &[
+                    at(0.10, 0.16),
+                    at(0.90, 0.16),
+                    at(0.90, 0.84),
+                    at(0.10, 0.84),
+                    at(0.10, 0.16),
+                ],
+                color,
+                window,
+            );
+            stroke(&[at(0.34, 0.16), at(0.34, 0.84)], color, window);
+            let (from, to) = if icon == Icon::SidebarExpand {
+                (0.54, 0.72)
+            } else {
+                (0.74, 0.56)
+            };
+            stroke(
+                &[at(from, 0.34), at(to, 0.50), at(from, 0.66)],
+                color,
+                window,
+            );
+        }
+    }
+}
+
+fn stroke(points: &[Point<Pixels>], color: Rgba, window: &mut Window) {
+    let Some((first, rest)) = points.split_first() else {
+        return;
+    };
+    let mut builder = PathBuilder::stroke(px(1.6));
+    builder.move_to(*first);
+    for point in rest {
+        builder.line_to(*point);
+    }
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
     }
 }
 
