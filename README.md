@@ -1,7 +1,7 @@
 <div align="center">
   <img src="docs/assets/banner.svg" alt="Melos" width="900">
   <br><br>
-  <img alt="version" src="https://img.shields.io/badge/version-0.1.16-8B5CF6?style=flat-square">
+  <img alt="version" src="https://img.shields.io/badge/version-0.1.17-8B5CF6?style=flat-square">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D4?style=flat-square">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0--or--later-22C55E?style=flat-square">
   <img alt="rust" src="https://img.shields.io/badge/Rust-1.99-000000?style=flat-square&logo=rust">
@@ -15,7 +15,7 @@
 
 Melos 是一个面向自建音乐库的 Windows 客户端。桌面端使用 GPUI，终端端使用 ratatui，两者共用同一套播放引擎、队列状态机、歌词与设置。它不是网页套壳：界面、解码与音频输出都是原生的。
 
-**当前版本 0.1.16（技术预览）。** 主要功能已接通并通过自动化检查；真实媒体键与冷启动已确认，剩余完整界面交互矩阵逐项确认，详见[发布状态](#发布状态)。
+**当前版本 0.1.17（技术预览）。** 主要功能已接通并通过自动化检查；真实媒体键与冷启动已确认，剩余完整界面交互矩阵逐项确认，详见[发布状态](#发布状态)。
 
 ## 亮点
 
@@ -33,16 +33,16 @@ Melos 是一个面向自建音乐库的 Windows 客户端。桌面端使用 GPUI
 
 | 包 | 大小 | 内容 |
 |---|---:|---|
-| `melos-0.1.16-windows-x64.zip` | 8.48 MB | 桌面版 + 终端版 |
-| **`melos-tui-0.1.16-windows-x64.zip`** | **2.42 MB** | **仅终端版** |
+| `melos-0.1.17-windows-x64.zip` | 8.48 MB | 桌面版 + 终端版 |
+| **`melos-tui-0.1.17-windows-x64.zip`** | **2.42 MB** | **仅终端版** |
 
-> **只想要终端？** 直接下载 `melos-tui-0.1.16-windows-x64.zip`，解压运行 `melos-tui.exe` 即可，不需要桌面组件。首次启动按 `6` 添加音乐源并登录。
+> **只想要终端？** 直接下载 `melos-tui-0.1.17-windows-x64.zip`，解压运行 `melos-tui.exe` 即可，不需要桌面组件。首次启动按 `6` 添加音乐源并登录。
 
 SHA256：
 
 ```
-65b01f356265c2ba3d2abf25f974977b1b665534111acffbf0dfe820bcf94725  melos-0.1.16-windows-x64.zip
-0c85efa08ff64b1ca4c517befb315f309873a162083af576df0aa010fae35b7a  melos-tui-0.1.16-windows-x64.zip
+c6f1a4e4d760b3eeaa586d6edd90fe78f76962920ef3d54e7ededd3cbadb7e9b  melos-0.1.17-windows-x64.zip
+25785881e22f73ac2fb03ba87f66988885c997ac72af328dc84576a68f294617  melos-tui-0.1.17-windows-x64.zip
 ```
 
 **系统要求**：Windows 10 1903+ 或 Windows 11（x64），并安装 [Microsoft Visual C++ 2015–2022 Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe)。
@@ -64,7 +64,7 @@ SHA256：
 ## 终端界面
 
 ```text
-┌ Melos 0.1.16 · 1 Albums · 2 Playlists · 3 Queue · 4 Lyrics · 5 Songs · 6 Sources · 7 Artists ┐
+┌ Melos 0.1.17 · 1 Albums · 2 Playlists · 3 Queue · 4 Lyrics · 5 Songs · 6 Sources · 7 Artists ┐
 │ ›  专辑名称 · 艺人                                                                        │
 │    另一张专辑 · 艺人                                                                      │
 │    ...                                                                                    │
@@ -76,7 +76,7 @@ SHA256：
 | 键 | 作用 |
 |---|---|
 | `1`–`7` | 专辑 / 歌单 / 队列 / 歌词 / 全部歌曲 / 音乐源 / 艺人 |
-| `/` | 搜索歌曲；在艺人页搜索艺人（Enter 提交，Esc 取消） |
+| `/` | 搜索歌曲与艺人，结果按艺人、歌曲排列（Enter 提交，Esc 取消） |
 | `↑` `↓` 或 `k` `j` | 选择条目 |
 | `Enter` | 打开专辑、歌单、艺人，播放歌曲，连接音乐源 |
 | `空格` | 播放 / 暂停 |
@@ -146,7 +146,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 ## 质量与验收
 
-- 96 个自动化测试通过，1 个 30 秒断流长测试显式忽略；覆盖解码、seek、gapless、断流恢复、队列、随机、设置迁移与 TUI 交互。
+- 97 个自动化测试通过，1 个 30 秒断流长测试显式忽略；覆盖解码、seek、gapless、断流恢复、队列、随机、设置迁移与 TUI 交互。
 - `cargo fmt` 与 `cargo clippy -D warnings` 通过。
 - 真实服务验证：FLAC 整曲与跨曲播放、40 首随机样本完整解码、转码流曲尾修复、终端隔离配置登录并加载 80 张专辑。
 - 发布包：桌面 13.66 MB、终端 5.22 MB，空闲工作集约 47–48 MB。
@@ -162,7 +162,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 ## 常见问题
 
 **只想下载终端版？**
-下载 `melos-tui-0.1.16-windows-x64.zip`，解压后运行 `melos-tui.exe`。TUI 可独立登录，不依赖桌面版。
+下载 `melos-tui-0.1.17-windows-x64.zip`，解压后运行 `melos-tui.exe`。TUI 可独立登录，不依赖桌面版。
 
 **怎么切换音乐源？**
 桌面：设置 → 音乐源 → 切换。终端：按 `6`，选中后 Enter。切换会停止当前播放并清空队列。

@@ -19,10 +19,17 @@ enum Page {
     Albums,
     Artists,
     Songs,
+    Search,
     Playlists,
     Queue,
     Lyrics,
     Sources,
+}
+
+#[derive(Clone)]
+enum SearchRow {
+    Artist(Artist),
+    Song(Box<Song>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,7 +72,9 @@ struct App {
     title: String,
     selection: ListState,
     query: Option<String>,
-    query_artists: bool,
+    search_rows: Vec<SearchRow>,
+    search_songs: Vec<Song>,
+    search_title: String,
     status: String,
     browse_ticket: u64,
     lyrics_ticket: u64,
@@ -83,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "Melos terminal player\nUsage: melos-tui [--help|--version]\nUses desktop connection settings; MELOS_CONFIG_DIR selects another configuration.\n1 albums · 2 playlists · 3 queue · 4 lyrics · 5 all songs · 6 music sources · 7 artists · / search · Enter open/play\nSpace pause · n/p next/previous · Left/Right seek · +/- volume · s shuffle · r repeat\nx mark album · R shuffle marked · a append song · i play next · d remove queue entry · J/K reorder · D clear upcoming\nL load more albums · t switch lyrics · e reconnect audio (paused) · Esc cancel/back · q or Ctrl+C quit"
+            "Melos terminal player\nUsage: melos-tui [--help|--version]\nUses desktop connection settings; MELOS_CONFIG_DIR selects another configuration.\n1 albums · 2 playlists · 3 queue · 4 lyrics · 5 all songs · 6 music sources · 7 artists · / search songs and artists · Enter open/play\nSpace pause · n/p next/previous · Left/Right seek · +/- volume · s shuffle · r repeat\nx mark album · R shuffle marked · a append song · i play next · d remove queue entry · J/K reorder · D clear upcoming\nL load more albums · t switch lyrics · e reconnect audio (paused) · Esc cancel/back · q or Ctrl+C quit"
         );
         return Ok(());
     }
@@ -180,7 +189,9 @@ impl App {
             title: String::new(),
             selection: ListState::default().with_selected(Some(0)),
             query: None,
-            query_artists: false,
+            search_rows: Vec::new(),
+            search_songs: Vec::new(),
+            search_title: String::new(),
             status: "Connecting…".into(),
             browse_ticket: 0,
             lyrics_ticket: 0,
@@ -463,11 +474,34 @@ impl App {
                     self.artists = artists;
                     self.status.clear();
                 }
-                Ok(Data::ArtistSearch { artists, query }) => {
-                    self.artists = artists;
-                    self.page = Page::Artists;
+                Ok(Data::Search {
+                    artists,
+                    songs,
+                    query,
+                }) => {
+                    let artist_count = artists.len();
+                    let mut rows = Vec::with_capacity(artist_count + songs.len());
+                    rows.extend(artists.into_iter().map(SearchRow::Artist));
+                    rows.extend(
+                        songs
+                            .iter()
+                            .cloned()
+                            .map(|song| SearchRow::Song(Box::new(song))),
+                    );
+                    self.search_rows = rows;
+                    self.search_songs = songs;
+                    self.search_title = query;
+                    if self.page != Page::Search {
+                        self.history.push(self.page);
+                    }
+                    self.page = Page::Search;
                     self.selection.select(Some(0));
-                    self.status = format!("搜索 “{query}”：{} 位艺人", self.artists.len());
+                    self.status = format!(
+                        "搜索 “{}”：{} 位艺人 · {} 首歌曲",
+                        self.search_title,
+                        artist_count,
+                        self.search_songs.len()
+                    );
                 }
                 Ok(Data::ScopeSongs(songs)) => {
                     if songs.is_empty() {
@@ -618,6 +652,7 @@ impl App {
             Page::Albums => self.albums.len(),
             Page::Artists => self.artists.len(),
             Page::Songs => self.songs.len(),
+            Page::Search => self.search_rows.len(),
             Page::Playlists => self.playlists.len(),
             Page::Queue => self.queue.len(),
             Page::Lyrics => self
@@ -688,11 +723,7 @@ impl App {
                 KeyCode::Enter => {
                     let query = self.query.take().unwrap();
                     if !query.trim().is_empty() {
-                        if self.query_artists {
-                            self.request(Job::SearchArtists(query));
-                        } else {
-                            self.request(Job::Search(query));
-                        }
+                        self.request(Job::Search(query));
                     }
                 }
                 KeyCode::Char(ch)
@@ -711,10 +742,7 @@ impl App {
         match key.code {
             KeyCode::Char('q') => return true,
             KeyCode::Char('e') => self.reconnect_output(),
-            KeyCode::Char('/') => {
-                self.query = Some(String::new());
-                self.query_artists = self.page == Page::Artists;
-            }
+            KeyCode::Char('/') => self.query = Some(String::new()),
             KeyCode::Char('1') => self.page(Page::Albums),
             KeyCode::Esc => self.back(),
             KeyCode::Char('2') => self.page(Page::Playlists),
@@ -723,7 +751,9 @@ impl App {
             KeyCode::Char('5') => self.library(),
             KeyCode::Char('6') => self.open_sources(),
             KeyCode::Char('7') => self.page(Page::Artists),
-            KeyCode::Char('x') if matches!(self.page, Page::Albums | Page::Artists) => {
+            KeyCode::Char('x')
+                if matches!(self.page, Page::Albums | Page::Artists | Page::Search) =>
+            {
                 match self.page {
                     Page::Albums => {
                         if let Some(id) = self.albums.get(index).map(|album| album.id.clone()) {
@@ -743,11 +773,21 @@ impl App {
                                 format!("已标记 {} 位艺人 · R 随机播放", self.marked_artists.len());
                         }
                     }
+                    Page::Search => {
+                        if let Some(SearchRow::Artist(artist)) = self.search_rows.get(index) {
+                            let id = artist.id.clone();
+                            if !self.marked_artists.insert(id.clone()) {
+                                self.marked_artists.remove(&id);
+                            }
+                            self.status =
+                                format!("已标记 {} 位艺人 · R 随机播放", self.marked_artists.len());
+                        }
+                    }
                     _ => {}
                 }
             }
             KeyCode::Char('R')
-                if matches!(self.page, Page::Albums | Page::Artists)
+                if matches!(self.page, Page::Albums | Page::Artists | Page::Search)
                     && (!self.marked_albums.is_empty() || !self.marked_artists.is_empty()) =>
             {
                 self.request(Job::ScopeSongs {
@@ -796,6 +836,21 @@ impl App {
                         self.request(Job::ArtistSongs(artist.id.clone()));
                     }
                 }
+                Page::Search => match self.search_rows.get(index) {
+                    Some(SearchRow::Artist(artist)) => {
+                        self.request(Job::ArtistSongs(artist.id.clone()));
+                    }
+                    Some(SearchRow::Song(song)) => {
+                        let song_index = self
+                            .search_songs
+                            .iter()
+                            .position(|item| item.id == song.id)
+                            .unwrap_or(0);
+                        self.queue.play_album(self.search_songs.clone(), song_index);
+                        self.start(false);
+                    }
+                    None => {}
+                },
                 Page::Songs => {
                     if index < self.songs.len() {
                         self.queue.play_album(self.songs.clone(), index);
@@ -989,6 +1044,32 @@ impl App {
                     })
                     .collect(),
             ),
+            Page::Search => (
+                format!(
+                    "Search: {} · 艺人 {} · 歌曲 {} · Enter open/play · x mark artist",
+                    self.search_title,
+                    self.search_rows
+                        .iter()
+                        .filter(|row| matches!(row, SearchRow::Artist(_)))
+                        .count(),
+                    self.search_songs.len()
+                ),
+                self.search_rows
+                    .iter()
+                    .map(|row| match row {
+                        SearchRow::Artist(artist) => ListItem::new(format!(
+                            "艺人  {} · {} albums",
+                            artist.name,
+                            artist.album_count.unwrap_or(0)
+                        )),
+                        SearchRow::Song(song) => ListItem::new(format!(
+                            "      {} · {}",
+                            song.title,
+                            song.artist.as_deref().unwrap_or("")
+                        )),
+                    })
+                    .collect(),
+            ),
             Page::Songs => (
                 if self.songs_library {
                     format!(
@@ -1158,11 +1239,7 @@ impl App {
             };
             format!("{field} · Enter next · Esc cancel")
         } else if let Some(query) = &self.query {
-            if self.query_artists {
-                format!("Search artists: {query} · Enter submit · Esc cancel")
-            } else {
-                format!("Search: {query} · Enter submit · Esc cancel")
-            }
+            format!("Search songs and artists: {query} · Enter submit · Esc cancel")
         } else {
             format!(
                 "{}\nSpace pause · n/p skip · ←/→ seek · +/- volume · e audio · Esc back · q quit",
@@ -1204,6 +1281,20 @@ mod tests {
         assert!(!app.queue.shuffle());
         assert_eq!(app.queue.repeat(), RepeatMode::Off);
     }
+    #[test]
+    fn x_marks_an_artist_from_search_results() {
+        let mut app = app();
+        app.search_rows = vec![SearchRow::Artist(Artist {
+            id: "search-artist".into(),
+            name: "Artist".into(),
+            ..Default::default()
+        })];
+        app.page = Page::Search;
+        app.selection.select(Some(0));
+        app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.marked_artists.contains("search-artist"));
+    }
+
     #[test]
     fn x_marks_and_unmarks_an_artist() {
         let mut app = app();

@@ -17,7 +17,6 @@ pub enum Job {
     Playlists,
     Playlist(String),
     Search(String),
-    SearchArtists(String),
     Lyrics(Box<Song>),
     NowPlaying(String),
     Scrobble(String),
@@ -39,8 +38,9 @@ pub enum Data {
         received: usize,
     },
     Artists(Vec<Artist>),
-    ArtistSearch {
+    Search {
         artists: Vec<Artist>,
+        songs: Vec<Song>,
         query: String,
     },
     ScopeSongs(Vec<Song>),
@@ -104,10 +104,14 @@ impl Worker {
                             }
                         }
                         Job::Artists => Data::Artists(client.artists().await?),
-                        Job::SearchArtists(query) => Data::ArtistSearch {
-                            artists: client.search(&query).await?.artist,
-                            query,
-                        },
+                        Job::Search(query) => {
+                            let result = client.search(&query).await?;
+                            Data::Search {
+                                artists: result.artist,
+                                songs: result.song,
+                                query,
+                            }
+                        }
                         Job::ArtistSongs(id) => {
                             let artist = client.artist(&id).await?;
                             let mut songs = Vec::new();
@@ -151,13 +155,6 @@ impl Worker {
                             }
                         }
                         Job::Playlists => Data::Playlists(client.playlists().await?),
-                        Job::Search(query) => {
-                            let result = client.search(&query).await?;
-                            Data::Songs {
-                                songs: result.song,
-                                title: format!("Search: {query}"),
-                            }
-                        }
                         Job::Lyrics(song) => Data::Lyrics(lyrics::fetch(&client, &song).await?),
                         Job::NowPlaying(id) => {
                             let _ = client.scrobble(&id, false).await;
