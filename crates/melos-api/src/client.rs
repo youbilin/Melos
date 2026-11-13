@@ -403,15 +403,15 @@ impl Client {
             }
             StreamQuality::Original => {
                 // Local decoder cannot handle this file: let the server convert
-                // it, but ask for MP3 explicitly.
+                // it, but ask for MP3 explicitly. The estimated length is not
+                // requested: an estimate makes the client treat the short body
+                // as a broken transfer when the encoder finishes early.
                 params.push(("format", "mp3".to_owned()));
                 params.push(("maxBitRate", DEFAULT_TRANSCODE_BITRATE.to_string()));
-                params.push(("estimateContentLength", "true".to_owned()));
             }
             StreamQuality::Transcode { max_bit_rate } => {
                 params.push(("format", "mp3".to_owned()));
                 params.push(("maxBitRate", max_bit_rate.to_string()));
-                params.push(("estimateContentLength", "true".to_owned()));
             }
         }
 
@@ -603,10 +603,13 @@ mod tests {
         let transcoded = client.stream_url(&song, StreamQuality::Original);
         assert!(transcoded.contains("format=mp3"));
         assert!(transcoded.contains("maxBitRate="));
+        // An estimated length makes short transcode bodies look truncated.
+        assert!(!transcoded.contains("estimateContentLength"));
 
         let forced = client.stream_url(&song, StreamQuality::Transcode { max_bit_rate: 128 });
         assert!(forced.contains("format=mp3"));
         assert!(forced.contains("maxBitRate=128"));
+        assert!(!forced.contains("estimateContentLength"));
     }
 
     #[tokio::test]

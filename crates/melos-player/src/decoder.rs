@@ -24,6 +24,7 @@ pub struct Decoder {
     sample_rate: u32,
     channels: u16,
     duration_ms: Option<u64>,
+    expected_ms: Option<u64>,
     time_base: TimeBase,
     seek_target: Option<Timestamp>,
     eof: bool,
@@ -129,6 +130,28 @@ mod tests {
     }
 
     #[test]
+    fn server_duration_covers_a_stream_without_container_duration() {
+        let mut decoder = Decoder::open_with_duration(
+            Box::new(DroppedTail {
+                data: FLAC.to_vec(),
+                position: 0,
+                fail_at: FLAC.len(),
+            }),
+            Some("flac"),
+            Some(1_000),
+        )
+        .unwrap();
+        // Transcoded streams usually expose no duration of their own.
+        decoder.duration_ms = None;
+        let mut chunk = Vec::new();
+        let mut frames = 0;
+        while decoder.next_chunk(&mut chunk).unwrap() {
+            frames += chunk.len() / usize::from(decoder.channels());
+        }
+        assert!(frames >= 41_000);
+    }
+
+    #[test]
     fn dropped_connection_mid_track_remains_an_error() {
         let cut = FLAC.len() / 2;
         let mut decoder = Decoder::open(
@@ -216,6 +239,17 @@ impl MediaSource for ObservedSource {
 
 impl Decoder {
     pub fn open(source: Box<dyn MediaSource>, hint: Option<&str>) -> Result<Self, PlayerError> {
+        Self::open_with_duration(source, hint, None)
+    }
+
+    /// Opens a decoder with the duration reported by the server. Streamed
+    /// transcodes often carry no usable duration in the container, so the
+    /// server value is the only way to recognise the end of the track.
+    pub fn open_with_duration(
+        source: Box<dyn MediaSource>,
+        hint: Option<&str>,
+        expected_ms: Option<u64>,
+    ) -> Result<Self, PlayerError> {
         let source_end = Arc::new(SourceEnd::default());
         let stream = MediaSourceStream::new(
             Box::new(ObservedSource {
@@ -293,6 +327,7 @@ impl Decoder {
             eof: false,
             source_end,
             decoded_end_ms: 0,
+            expected_ms: expected_ms.filter(|ms| *ms > 0),
         })
     }
 
@@ -402,7 +437,7 @@ impl Decoder {
     }
 
     fn decoded_to_end(&self, tolerance_ms: u64) -> bool {
-        let Some(duration) = self.duration_ms else {
+        let Some(duration) = self.duration_ms.or(self.expected_ms) else {
             return false;
         };
         // Require at least 90% of the declared audio so a track truncated in

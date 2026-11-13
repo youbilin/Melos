@@ -676,13 +676,14 @@ fn decode_track(
         }
     };
 
-    let mut decoder = match Decoder::open(source, spec.hint.as_deref()) {
-        Ok(decoder) => decoder,
-        Err(error) => {
-            set_decode_error(shared, token, error);
-            return None;
-        }
-    };
+    let mut decoder =
+        match Decoder::open_with_duration(source, spec.hint.as_deref(), spec.duration_ms) {
+            Ok(decoder) => decoder,
+            Err(error) => {
+                set_decode_error(shared, token, error);
+                return None;
+            }
+        };
 
     if let Some(position_ms) = take_seek(shared, token)
         && let Err(error) = decoder.seek_ms(position_ms)
