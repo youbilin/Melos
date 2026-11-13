@@ -8,9 +8,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 fn memory_mb() -> (f64, f64) {
-    use windows::Win32::System::ProcessStatus::{
-        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
-    };
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
     use windows::Win32::System::Threading::GetCurrentProcess;
     unsafe {
         let mut counters = PROCESS_MEMORY_COUNTERS::default();

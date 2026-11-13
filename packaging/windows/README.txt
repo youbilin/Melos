@@ -1,4 +1,4 @@
-Melos 0.1.13 — development preview
+Melos 0.1.14 — development preview
 
 Extract this folder and run melos.exe on Windows 10 (1903+)/11 (x64).
 For terminal playback, run melos-tui.exe in PowerShell or Windows Terminal.

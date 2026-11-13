@@ -1,7 +1,7 @@
 //! Terminal frontend using the same API, queue and audio engine as the desktop.
 mod worker;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use melos_api::{Album, Client, Credentials, Playlist, Song, StreamQuality};
+use melos_api::{Album, Artist, Client, Credentials, Playlist, Song, StreamQuality};
 use melos_core::lyrics::Lyrics;
 use melos_core::{Queue, RepeatMode, Settings};
 use melos_player::{Engine, EngineSnapshot, StreamSpec};
@@ -17,6 +17,7 @@ use worker::{Data, Job, Worker};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
     Albums,
+    Artists,
     Songs,
     Playlists,
     Queue,
@@ -52,6 +53,8 @@ struct App {
     history: Vec<Page>,
     albums: Vec<Album>,
     marked_albums: HashSet<String>,
+    artists: Vec<Artist>,
+    marked_artists: HashSet<String>,
     offset: u32,
     more: bool,
     playlists: Vec<Playlist>,
@@ -79,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "Melos terminal player\nUsage: melos-tui [--help|--version]\nUses desktop connection settings; MELOS_CONFIG_DIR selects another configuration.\n1 albums · 2 playlists · 3 queue · 4 lyrics · 5 all songs · 6 music sources · / search · Enter open/play\nSpace pause · n/p next/previous · Left/Right seek · +/- volume · s shuffle · r repeat\nx mark album · R shuffle marked · a append song · i play next · d remove queue entry · J/K reorder · D clear upcoming\nL load more albums · t switch lyrics · e reconnect audio (paused) · Esc cancel/back · q or Ctrl+C quit"
+            "Melos terminal player\nUsage: melos-tui [--help|--version]\nUses desktop connection settings; MELOS_CONFIG_DIR selects another configuration.\n1 albums · 2 playlists · 3 queue · 4 lyrics · 5 all songs · 6 music sources · 7 artists · / search · Enter open/play\nSpace pause · n/p next/previous · Left/Right seek · +/- volume · s shuffle · r repeat\nx mark album · R shuffle marked · a append song · i play next · d remove queue entry · J/K reorder · D clear upcoming\nL load more albums · t switch lyrics · e reconnect audio (paused) · Esc cancel/back · q or Ctrl+C quit"
         );
         return Ok(());
     }
@@ -164,6 +167,8 @@ impl App {
             history: Vec::new(),
             albums: Vec::new(),
             marked_albums: HashSet::new(),
+            artists: Vec::new(),
+            marked_artists: HashSet::new(),
             offset: 0,
             more: true,
             playlists: Vec::new(),
@@ -212,6 +217,9 @@ impl App {
         }
         if page == Page::Albums && self.albums.is_empty() {
             self.request(Job::Albums(0));
+        }
+        if page == Page::Artists && self.artists.is_empty() {
+            self.request(Job::Artists);
         }
     }
     /// Esc goes one level up: playlist/album songs return to their list.
@@ -449,6 +457,10 @@ impl App {
                     self.selection.select(Some(0));
                     self.status.clear();
                 }
+                Ok(Data::Artists(artists)) => {
+                    self.artists = artists;
+                    self.status.clear();
+                }
                 Ok(Data::ScopeSongs(songs)) => {
                     if songs.is_empty() {
                         self.status = "所选专辑没有歌曲".into();
@@ -596,6 +608,7 @@ impl App {
     fn len(&self) -> usize {
         match self.page {
             Page::Albums => self.albums.len(),
+            Page::Artists => self.artists.len(),
             Page::Songs => self.songs.len(),
             Page::Playlists => self.playlists.len(),
             Page::Queue => self.queue.len(),
@@ -694,19 +707,38 @@ impl App {
             KeyCode::Char('4') => self.page(Page::Lyrics),
             KeyCode::Char('5') => self.library(),
             KeyCode::Char('6') => self.open_sources(),
-            KeyCode::Char('x') if self.page == Page::Albums => {
-                if let Some(album) = self.albums.get(index) {
-                    if !self.marked_albums.insert(album.id.clone()) {
-                        self.marked_albums.remove(&album.id);
+            KeyCode::Char('7') => self.page(Page::Artists),
+            KeyCode::Char('x') if matches!(self.page, Page::Albums | Page::Artists) => {
+                match self.page {
+                    Page::Albums => {
+                        if let Some(id) = self.albums.get(index).map(|album| album.id.clone()) {
+                            if !self.marked_albums.insert(id.clone()) {
+                                self.marked_albums.remove(&id);
+                            }
+                            self.status =
+                                format!("已标记 {} 张专辑 · R 随机播放", self.marked_albums.len());
+                        }
                     }
-                    self.status =
-                        format!("已标记 {} 张专辑 · R 随机播放", self.marked_albums.len());
+                    Page::Artists => {
+                        if let Some(id) = self.artists.get(index).map(|artist| artist.id.clone()) {
+                            if !self.marked_artists.insert(id.clone()) {
+                                self.marked_artists.remove(&id);
+                            }
+                            self.status =
+                                format!("已标记 {} 位艺人 · R 随机播放", self.marked_artists.len());
+                        }
+                    }
+                    _ => {}
                 }
             }
-            KeyCode::Char('R') if self.page == Page::Albums && !self.marked_albums.is_empty() => {
-                self.request(Job::ScopeSongs(
-                    self.marked_albums.iter().cloned().collect(),
-                ));
+            KeyCode::Char('R')
+                if matches!(self.page, Page::Albums | Page::Artists)
+                    && (!self.marked_albums.is_empty() || !self.marked_artists.is_empty()) =>
+            {
+                self.request(Job::ScopeSongs {
+                    albums: self.marked_albums.iter().cloned().collect(),
+                    artists: self.marked_artists.iter().cloned().collect(),
+                });
                 self.status = "准备随机播放…".into();
             }
             KeyCode::Char('a') if self.page == Page::Sources => self.start_source_form(),
@@ -715,7 +747,9 @@ impl App {
                 self.selection_state().select(Some(index.saturating_sub(1)));
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                let index = (index + 1).min(self.len().saturating_sub(1));
+                let selected = self.selection_state().selected();
+                let index =
+                    selected.map_or(0, |index| (index + 1).min(self.len().saturating_sub(1)));
                 self.selection_state().select(Some(index));
             }
             KeyCode::Char('L')
@@ -740,6 +774,11 @@ impl App {
                 Page::Playlists => {
                     if let Some(playlist) = self.playlists.get(index) {
                         self.request(Job::Playlist(playlist.id.clone()));
+                    }
+                }
+                Page::Artists => {
+                    if let Some(artist) = self.artists.get(index) {
+                        self.request(Job::ArtistSongs(artist.id.clone()));
                     }
                 }
                 Page::Songs => {
@@ -886,7 +925,7 @@ impl App {
         .areas(frame.area());
         frame.render_widget(
             Paragraph::new(format!(
-                "Melos {} · 1 Albums · 2 Playlists · 3 Queue · 4 Lyrics · 5 Songs · 6 Sources · / Search",
+                "Melos {} · 1 Albums · 2 Playlists · 3 Queue · 4 Lyrics · 5 Songs · 6 Sources · 7 Artists · / Search",
                 env!("CARGO_PKG_VERSION")
             ))
             .block(Block::bordered()),
@@ -910,6 +949,27 @@ impl App {
                             },
                             album.name,
                             album.artist.as_deref().unwrap_or("")
+                        ))
+                    })
+                    .collect(),
+            ),
+            Page::Artists => (
+                format!(
+                    "Artists · Enter songs · x mark · R shuffle marked ({})",
+                    self.marked_artists.len()
+                ),
+                self.artists
+                    .iter()
+                    .map(|artist| {
+                        ListItem::new(format!(
+                            "{} {} · {} albums",
+                            if self.marked_artists.contains(&artist.id) {
+                                "✓"
+                            } else {
+                                " "
+                            },
+                            artist.name,
+                            artist.album_count.unwrap_or(0)
                         ))
                     })
                     .collect(),
@@ -1126,6 +1186,22 @@ mod tests {
         assert_eq!(app.queue.repeat(), RepeatMode::Off);
     }
     #[test]
+    fn x_marks_and_unmarks_an_artist() {
+        let mut app = app();
+        app.artists.push(Artist {
+            id: "artist-1".into(),
+            name: "Artist".into(),
+            ..Default::default()
+        });
+        app.page = Page::Artists;
+        app.selection.select(Some(0));
+        app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.marked_artists.contains("artist-1"));
+        app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.marked_artists.is_empty());
+    }
+
+    #[test]
     fn x_marks_and_unmarks_an_album() {
         let mut app = app();
         app.albums.push(Album {
@@ -1221,7 +1297,7 @@ mod tests {
                 .map(|index| format!("Line {index}\n"))
                 .collect::<String>(),
         )];
-        for _ in 0..28 {
+        for _ in 0..29 {
             app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         app.sync();

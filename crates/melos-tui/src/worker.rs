@@ -1,13 +1,18 @@
 //! Network I/O runs on a Tokio thread so the terminal remains responsive.
-use melos_api::{Album, AlbumListType, Client, Playlist, Song};
+use melos_api::{Album, AlbumListType, Artist, Client, Playlist, Song};
 use melos_core::lyrics::{self, Lyrics};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 pub enum Job {
     Connect,
     Albums(u32),
+    Artists,
+    ArtistSongs(String),
     Library(u32),
-    ScopeSongs(Vec<String>),
+    ScopeSongs {
+        albums: Vec<String>,
+        artists: Vec<String>,
+    },
     Album(String),
     Playlists,
     Playlist(String),
@@ -32,6 +37,7 @@ pub enum Data {
         offset: u32,
         received: usize,
     },
+    Artists(Vec<Artist>),
     ScopeSongs(Vec<Song>),
     Playlists(Vec<Playlist>),
     Lyrics(Vec<Lyrics>),
@@ -92,14 +98,32 @@ impl Worker {
                                 received,
                             }
                         }
-                        Job::ScopeSongs(albums) => {
+                        Job::Artists => Data::Artists(client.artists().await?),
+                        Job::ArtistSongs(id) => {
+                            let artist = client.artist(&id).await?;
+                            let mut songs = Vec::new();
+                            for album in artist.album.iter().take(40) {
+                                songs.extend(client.album(&album.id).await?.song);
+                            }
+                            Data::Songs {
+                                songs,
+                                title: artist.artist.name,
+                            }
+                        }
+                        Job::ScopeSongs { albums, artists } => {
                             let mut songs = Vec::new();
                             for id in albums {
                                 songs.extend(client.album(&id).await?.song);
                             }
+                            for id in artists {
+                                let artist = client.artist(&id).await?;
+                                for album in artist.album.iter().take(40) {
+                                    songs.extend(client.album(&album.id).await?.song);
+                                }
+                            }
                             songs.truncate(2000);
                             if songs.is_empty() {
-                                return Err(melos_api::Error::Decode("所选专辑没有歌曲".into()));
+                                return Err(melos_api::Error::Decode("所选范围没有歌曲".into()));
                             }
                             Data::ScopeSongs(songs)
                         }

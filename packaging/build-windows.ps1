@@ -1,4 +1,4 @@
-param([switch]$SkipBuild)
+param([switch]$SkipBuild, [string]$TuiBinary)
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Push-Location $repoRoot
@@ -31,8 +31,16 @@ try {
     $stage = Join-Path $repoRoot ('output/package-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force $outputDir, $stage | Out-Null
     Copy-Item -LiteralPath $binary -Destination $stage
-    $terminalBinary = Join-Path $repoRoot 'target/release/melos-tui.exe'
+    $terminalBinary = if ($TuiBinary) {
+        (Resolve-Path -LiteralPath $TuiBinary).Path
+    } else {
+        Join-Path $repoRoot 'target/release/melos-tui.exe'
+    }
     if (-not (Test-Path -LiteralPath $terminalBinary)) { throw 'Terminal release binary does not exist.' }
+    $terminalVersion = (Get-Item -LiteralPath $terminalBinary).VersionInfo.ProductVersion
+    if ($terminalVersion -and $terminalVersion -ne $workspaceVersion) {
+        throw 'The terminal binary resource version does not match the workspace version.'
+    }
     Copy-Item -LiteralPath $terminalBinary -Destination $stage
     Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $repoRoot 'packaging/windows/README.txt') -Destination $stage
