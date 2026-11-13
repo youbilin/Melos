@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="220" viewBox="0 0 900 220" role="img" aria-label="Melos">
+  <defs>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#8B5CF6"/>
+      <stop offset="1" stop-color="#22D3EE"/>
+    </linearGradient>
+  </defs>
+  <rect width="900" height="220" rx="24" fill="#0B0B0F"/>
+  <g fill="url(#accent)">
+    <rect x="612" y="96" width="7" height="28" rx="3.5"/>
+    <rect x="627" y="80" width="7" height="60" rx="3.5"/>
+    <rect x="642" y="64" width="7" height="92" rx="3.5"/>
+    <rect x="657" y="88" width="7" height="44" rx="3.5"/>
+    <rect x="672" y="52" width="7" height="116" rx="3.5"/>
+    <rect x="687" y="76" width="7" height="68" rx="3.5"/>
+    <rect x="702" y="40" width="7" height="140" rx="3.5"/>
+    <rect x="717" y="72" width="7" height="76" rx="3.5"/>
+    <rect x="732" y="58" width="7" height="104" rx="3.5"/>
+    <rect x="747" y="92" width="7" height="36" rx="3.5"/>
+    <rect x="762" y="66" width="7" height="88" rx="3.5"/>
+    <rect x="777" y="84" width="7" height="52" rx="3.5"/>
+    <rect x="792" y="100" width="7" height="20" rx="3.5"/>
+    <rect x="807" y="74" width="7" height="72" rx="3.5"/>
+    <rect x="822" y="92" width="7" height="36" rx="3.5"/>
+    <rect x="837" y="60" width="7" height="100" rx="3.5"/>
+  </g>
+  <g fill="#F5F5F7">
+    <text x="60" y="106" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="62" font-weight="700" letter-spacing="-1">Melos</text>
+    <text x="62" y="146" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="18" fill="#9A9A9E">Navidrome / OpenSubsonic · desktop + terminal</text>
+    <text x="62" y="176" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="14" fill="#68686C">Rust · GPUI · ratatui · symphonia</text>
+  </g>
+</svg>

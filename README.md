@@ -1,110 +1,136 @@
-# Melos
+<div align="center">
+  <img src="docs/assets/banner.svg" alt="Melos" width="900">
+  <br><br>
+  <img alt="version" src="https://img.shields.io/badge/version-0.1.14-8B5CF6?style=flat-square">
+  <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D4?style=flat-square">
+  <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0--or--later-22C55E?style=flat-square">
+  <img alt="rust" src="https://img.shields.io/badge/Rust-1.99-000000?style=flat-square&logo=rust">
+  <img alt="protocol" src="https://img.shields.io/badge/protocol-OpenSubsonic-22D3EE?style=flat-square">
+  <br><br>
+  <b>Navidrome / OpenSubsonic 的原生桌面与终端音乐客户端</b><br>
+  <sub>Rust · GPUI · ratatui · symphonia · 无 WebView、无 MPV、无 GStreamer</sub>
+</div>
 
-面向 [Navidrome](https://www.navidrome.org/) / OpenSubsonic 的原生音乐客户端，提供 Windows 桌面界面和终端界面（TUI）。使用 Rust 编写，界面层为 GPUI，播放引擎基于 symphonia + cpal，不依赖 WebView、MPV 或 GStreamer。
+---
 
-- 当前版本：**0.1.14（技术预览）**
-- 支持平台：Windows 10 1903+ / Windows 11（x64）
-- 许可证：GPL-3.0-or-later
+Melos 是一个面向自建音乐库的 Windows 客户端。桌面端使用 GPUI，终端端使用 ratatui，两者共用同一套播放引擎、队列状态机、歌词与设置。它不是网页套壳：界面、解码与音频输出都是原生的。
 
-> **发布状态**：0.1.14 的主要功能已接通并通过自动化检查，可以作为公开测试版使用；但按项目验收标准，仍有三项未完成（真实媒体键、冷启动 < 1 秒、完整界面交互矩阵），因此不标记为 1.0 正式版；80 分钟连续播放长测已按用户要求取消，不再作为发布门槛。已验证与待验收的范围见[验收记录](docs/03-acceptance.md)。
+**当前版本 0.1.14（技术预览）。** 主要功能已接通并通过自动化检查；正式 1.0 还差真实媒体键、冷启动与完整界面交互矩阵三项验收，详见[发布状态](#发布状态)。
 
-## 功能
+## 亮点
 
-### 播放与队列
-- 流式播放，本地解码 WAV、FLAC、MP3、AAC/ALAC、Vorbis；Opus、WMA、APE、DSD 等格式由服务端转码为 MP3
-- 无缝合辑（gapless）、精确 seek、预取、断流恢复、HTTP Range 续传
-- 单曲 / 列表循环；随机播放可限定在多选的专辑或艺人范围内，队列播完继续在该范围续抽；未选范围时从全库随机
-- 队列编辑：下一首播放、追加歌曲或整张专辑、移除、拖动/按钮排序、清空待播，编辑不打断当前音频
-- 播放进度与音量拖动；音频设备断开后可手动重连，保留歌曲、队列和位置
+- **两套前端，一个内核**：桌面与终端共享队列、随机范围、歌词、设置和多音乐源，行为一致。
+- **终端可独立使用**：TUI 自带登录与音乐源管理，不需要先运行桌面版。
+- **为自建曲库设计**：专辑/艺人/歌单/全部歌曲分页加载，长列表可见行渲染，封面按需缓存。
+- **限定范围随机**：多选若干专辑或艺人后随机播放，并在同一范围内持续续播，而不是每首跳回全库。
+- **多音乐源**：每个服务器独立保存账号与 DPAPI 密码；添加不切换，切换时才断开重连。
+- **完整歌词体验**：同步行居中、点击跳转、多版本切换、纯文本回退。
 
-### 浏览与曲库
-- 专辑、艺人、歌单、全部歌曲、搜索、收藏
-- 专辑/艺人页“多选随机”：勾选若干项后一键随机播放，并在该范围内持续续播
-- 全部歌曲按艺人 → 专辑 → 碟号 → 音轨排序，分页加载
-- 专辑/歌单歌曲列表使用可见行渲染，长列表不卡顿；封面按需加载并做磁盘缓存
-- 歌单：浏览/播放、从队列新建或追加、移除歌曲、重命名、确认删除
+## 下载
 
-### 歌词
-- 点击播放栏封面进入歌词页，再点封面返回原页面
-- 同步歌词按 240 ms 缓动居中；点击行跳转；支持多版本切换、纯文本与 LRC
-- 纯文本歌词不编造时间轴；旧版歌词接口自动回退
+发布包由 `./packaging/build-windows.ps1` 生成于 `output/release/`，每个 ZIP 旁附 `.sha256`。
 
-### 桌面体验
-- 可收起侧栏；沉浸式背景；队列抽屉
-- Windows 系统媒体控制（SMTC）与封面
-- 快捷键：空格播放/暂停，←/→ seek 5 秒，Ctrl+←/→ 上一首/下一首，Ctrl+↑/↓ 音量，Ctrl+S/R/Q 随机/循环/队列，Ctrl+F 搜索
+| 包 | 大小 | 内容 |
+|---|---:|---|
+| `melos-0.1.14-windows-x64.zip` | 8.49 MB | 桌面版 + 终端版 |
+| **`melos-tui-0.1.14-windows-x64.zip`** | **2.43 MB** | **仅终端版** |
 
-### 终端（TUI）
-- 可独立登录，不依赖桌面版；也可以沿用桌面保存的音乐源
-- 音乐源管理：添加、切换、删除（每源独立密码）
-- 专辑、艺人、歌单、全部歌曲、歌曲搜索、队列编辑、歌词
-- 同步歌词居中；Esc 按页面历史逐级返回
+> **只想要终端？** 直接下载 `melos-tui-0.1.14-windows-x64.zip`，解压运行 `melos-tui.exe` 即可，不需要桌面组件。首次启动按 `6` 添加音乐源并登录。
 
-### 设置
-- 多音乐源：添加只保存，显式切换时才连接
-- 音质：原始 / 128 / 192 / 320 kbps（转码由服务端完成）
-- 音量、随机、循环持久化；密码使用 Windows DPAPI 加密
+SHA256：
 
-## 系统要求
+```
+7c483f47e263b6c8bee395e81ca6b85ac19fdbc9af9956c5c5606a8bc48a7e5b  melos-0.1.14-windows-x64.zip
+432c27fd81594acf81fa45fdd0c43eb3c7814086eed7a8fabfc489b8b3180d25  melos-tui-0.1.14-windows-x64.zip
+```
 
-- Windows 10 1903+ 或 Windows 11（x64）
-- [Microsoft Visual C++ 2015–2022 Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe)
+**系统要求**：Windows 10 1903+ 或 Windows 11（x64），并安装 [Microsoft Visual C++ 2015–2022 Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe)。
 
-## 下载与运行
+## 快速开始
 
-| 包 | 内容 |
-|---|---|
-| `melos-0.1.14-windows-x64.zip` | 桌面版 + 终端版 |
-| `melos-tui-0.1.14-windows-x64.zip` | 仅终端版 |
+### 桌面版
 
-产物位于 `output/release/`，每个 ZIP 旁附带 `.sha256` 校验文件；当前版本的哈希与文件大小记录在[验收记录](docs/03-acceptance.md)。
+1. 解压并运行 `melos.exe`。
+2. 填写服务器地址、用户名、密码，点击“连接”。
+3. 在设置页选择音质；密码由 Windows DPAPI 加密保存。
 
-**桌面版**：解压后运行 `melos.exe`，填写服务器地址、用户名和密码，点击“连接”。
+### 终端版
 
-**终端版**：在 Windows Terminal 或 PowerShell 中运行 `melos-tui.exe`。没有可用连接时停在“音乐源”页：
+1. 在 Windows Terminal 或 PowerShell 中运行 `melos-tui.exe`。
+2. 没有保存连接时会停在“音乐源”页；按 `a` 依次输入服务器、用户名、密码，Enter 提交并连接。
+3. 已有音乐源时用 `↑/↓` 选择、`Enter` 连接；`d` 删除非当前源。
 
-1. 按 `6` 进入音乐源（首次启动即在此页）
-2. 按 `a`，依次输入服务器、用户名、密码，Enter 提交并连接
-3. 已有源时用 `↑/↓` 选择、`Enter` 连接；`d` 删除非当前源
+## 终端界面
 
-## 终端按键
+```text
+┌ Melos 0.1.14 · 1 Albums · 2 Playlists · 3 Queue · 4 Lyrics · 5 Songs · 6 Sources · 7 Artists ┐
+│ ›  专辑名称 · 艺人                                                                        │
+│    另一张专辑 · 艺人                                                                      │
+│    ...                                                                                    │
+├ Now Playing · 歌曲名 · 03:12 / 04:28 · Vol 80% · Shuffle true · Repeat Off ───────────────┤
+│ 80 albums loaded · Space pause · n/p skip · x mark · R shuffle marked · Esc back · q quit │
+└───────────────────────────────────────────────────────────────────────────────────────────┘
+```
 
 | 键 | 作用 |
 |---|---|
-| `1` / `2` / `3` / `4` / `5` / `6` / `7` | 专辑 / 歌单 / 队列 / 歌词 / 全部歌曲 / 音乐源 / 艺人 |
+| `1`–`7` | 专辑 / 歌单 / 队列 / 歌词 / 全部歌曲 / 音乐源 / 艺人 |
 | `/` | 搜索歌曲（Enter 提交，Esc 取消） |
 | `↑` `↓` 或 `k` `j` | 选择条目 |
-| `Enter` | 打开专辑/歌单/艺人，播放歌曲，连接音乐源 |
+| `Enter` | 打开专辑、歌单、艺人，播放歌曲，连接音乐源 |
 | `空格` | 播放 / 暂停 |
 | `n` / `p` | 下一首 / 上一首 |
-| `←` / `→` | 后退 / 前进 5 秒 |
+| `←` / `→` | 快退 / 快进 5 秒 |
 | `+` / `-` | 音量 |
 | `s` / `r` | 随机 / 循环 |
+| `x` / `R` | 标记当前专辑或艺人 / 随机播放已标记范围 |
 | `a` / `i` | 加入队列 / 下一首播放（歌曲页） |
 | `d` / `J` / `K` / `D` | 移除 / 下移 / 上移 / 清空待播（队列页） |
-| `x` / `R` | 标记条目 / 随机播放已标记范围（专辑页、艺人页） |
 | `L` | 加载更多（专辑页、全部歌曲页） |
 | `t` | 切换歌词版本（歌词页） |
 | `e` | 重新连接音频输出 |
 | `Esc` | 取消输入 / 返回上一级 |
 | `q` 或 `Ctrl+C` | 退出 |
 
-终端版暂不支持歌单编辑、艺人/专辑搜索和系统媒体键，这些功能请使用桌面版。
+终端版暂不支持歌单编辑、艺人/专辑搜索和系统媒体键，这些请使用桌面版。
 
-## 配置与隐私
+## 功能
 
-- 设置保存在 `%APPDATA%\melos\settings.json`，包含音乐源列表、音质、音量与播放模式
-- 密码用 Windows DPAPI 加密，绑定当前 Windows 用户；不写入明文
-- 设置 `MELOS_CONFIG_DIR` 可指定独立配置目录，桌面版与终端版可完全隔离
-- 除连接你指定的服务器外，不上传数据、不包含遥测
+| 模块 | 能力 |
+|---|---|
+| 播放 | 流式播放、gapless、seek、预取、断流恢复；单曲/列表循环；随机可限定专辑/艺人范围 |
+| 解码 | 本地 WAV、FLAC、MP3、AAC/ALAC、Vorbis；其他格式请求服务端转码 |
+| 曲库 | 专辑、艺人、歌单、全部歌曲、收藏、搜索；分页与可见行渲染 |
+| 全部歌曲 | 每页 200 首，按艺人 → 专辑 → 碟号 → 音轨排序 |
+| 歌词 | 同步行居中缓动、点击跳转、多版本、纯文本/LRC、旧接口回退 |
+| 队列 | 下一首播放、整张追加、移除、拖动排序、清空待播，编辑不打断音频 |
+| 音乐源 | 多服务器、独立 DPAPI 密码、显式切换、旧配置自动迁移 |
+| 系统集成 | Windows SMTC、媒体封面、快捷键；输入框与中文输入法组合保护 |
+| 终端 | 独立登录、音乐源管理、专辑/艺人标记随机、歌词、队列编辑 |
 
-## 从源码构建
+## 架构
 
-工具链固定在 `rust-toolchain.toml`（Rust 1.99.0，MSVC 目标）。需要 Visual Studio Build Tools（C++ 工作负载）和 Windows SDK。
+```text
+crates/
+  melos-api/      Subsonic / OpenSubsonic 客户端：认证、DTO、流 URL、错误映射
+  melos-player/   symphonia 解码 + cpal 输出：预取、seek、gapless、断流恢复
+  melos-core/     队列、歌词、曲库排序、设置与 DPAPI 凭据（无 UI 依赖）
+  melos-app/      GPUI 桌面端（唯一依赖 gpui 的 crate）
+  melos-tui/      ratatui 终端端（复用 core / player / api）
+```
+
+领域层与播放器不依赖 UI 工具包；GitHub Actions 会检查底层 crate 的依赖图。
+
+## 构建
+
+工具链固定在 `rust-toolchain.toml`（Rust 1.99.0，MSVC 目标），需要 Visual Studio Build Tools（C++ 工作负载）和 Windows SDK。
 
 ```powershell
-# 进入 MSVC 环境后
+# 先进入 MSVC 开发者环境
 cargo build --release --locked -p melos-app -p melos-tui
+
+# 打包桌面+终端、仅终端两个 ZIP
+./packaging/build-windows.ps1
 ```
 
 常用检查：
@@ -115,56 +141,47 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-> Git Bash 直接调用 `cargo` 时可能误用其他 `link.exe`。请通过 `cmd /c "\"...\vcvars64.bat\" && cargo ..."` 或已导入 MSVC 环境的 PowerShell 运行。仓库的 `packaging/build-windows.ps1` 会自动定位 MSVC。
+> 在 Git Bash 中直接运行 `cargo` 可能误用其他 `link.exe`，请通过 `cmd /c "\"...\vcvars64.bat\" && cargo ..."` 或已导入 MSVC 环境的 PowerShell 执行。
 
-## 打包
+## 质量与验收
 
-```powershell
-./packaging/build-windows.ps1
-```
+- 96 个自动化测试通过，1 个 30 秒断流长测试显式忽略；覆盖解码、seek、gapless、断流恢复、队列、随机、设置迁移与 TUI 交互。
+- `cargo fmt` 与 `cargo clippy -D warnings` 通过。
+- 真实服务验证：FLAC 整曲与跨曲播放、40 首随机样本完整解码、转码流曲尾修复、终端隔离配置登录并加载 80 张专辑。
+- 发布包：桌面 13.66 MB、终端 5.22 MB，空闲工作集约 47–48 MB。
 
-生成桌面+终端 ZIP、仅终端 ZIP 及各自的 SHA256。脚本会校验二进制资源版本与工作区版本一致。
+### 发布状态
 
-## 架构
+- 已完成：浏览、搜索、播放、队列、歌词、歌单、多源、终端独立登录、限定范围随机。
+- 待人工验收：真实媒体键、冷启动 < 1 秒（当前首次约 1.5–2.5 秒）、拖动与中文输入等完整界面矩阵。
+- 80 分钟真实服务长测已按用户要求取消，不再作为发布门槛。
 
-```
-crates/
-  melos-api/      Subsonic / OpenSubsonic 客户端（认证、DTO、流 URL、错误映射）
-  melos-player/   symphonia 解码 + cpal 输出、预取、seek、断流恢复
-  melos-core/     队列状态机、歌词、排序、设置与 DPAPI 凭据（无 UI 依赖）
-  melos-app/      GPUI 桌面端（唯一依赖 gpui 的 crate）
-  melos-tui/      ratatui 终端端（复用 core / player / api）
-```
+## 常见问题
 
-领域层与播放器不依赖 GPUI；CI 会检查底层 crate 的依赖图。
+**只想下载终端版？**
+下载 `melos-tui-0.1.14-windows-x64.zip`，解压后运行 `melos-tui.exe`。TUI 可独立登录，不依赖桌面版。
 
-## 质量与验证
+**怎么切换音乐源？**
+桌面：设置 → 音乐源 → 切换。终端：按 `6`，选中后 Enter。切换会停止当前播放并清空队列。
 
-- 96 个自动化测试通过（1 个 30 秒断流长测试显式忽略），覆盖解码、seek、gapless、断流恢复、队列、随机、设置迁移与 TUI 交互
-- `cargo fmt`、`cargo clippy -D warnings` 通过
-- 真实服务验证：原始 FLAC 整曲解码与跨曲播放、40 首随机样本完整解码、转码流曲尾修复前后各 3 首对比、终端隔离配置登录并加载 80 张专辑
-- 发布包：桌面 13.64 MB、终端 5.18 MB，空闲内存约 47–48 MB
+**随机能只放某些专辑或艺人吗？**
+可以。桌面在专辑/艺人页点“多选随机”后勾选并播放；终端在专辑/艺人页用 `x` 标记、`R` 播放。队列结束后继续在该范围续抽。
 
-尚未完成的人工验收：
+**支持系统媒体键吗？**
+桌面接入 Windows SMTC，系统媒体面板与媒体键可控制播放；真实键盘的最终确认仍待验收。
 
-- [ ] 真实媒体键（键盘媒体键与系统面板）
-- [ ] 冷启动 < 1.0 秒（首次隐藏初始化约 1.4–2.5 秒，后续约 0.25 秒）
-- [ ] 拖动进度/音量、中文输入、缩放与长列表的完整界面矩阵
+**配置存在哪？**
+`%APPDATA%\melos\settings.json`。密码由 DPAPI 加密。设置 `MELOS_CONFIG_DIR` 可让桌面与终端使用完全独立的配置目录。
 
-## 已知限制
-
-- 本地只解码 WAV/FLAC/MP3/AAC/ALAC/Vorbis，其他格式依赖服务端转码
-- 未选择范围时随机从整个曲库抽歌；终端只能标记专辑（没有艺人列表），艺人范围在桌面版选择
-- 终端版没有歌单编辑、艺人/专辑搜索与媒体键
-- 不支持 Windows 10 1903 之前的系统
-
-## 文档
-
-- [实施计划](docs/01-implementation-plan.md)
-- [验收记录](docs/03-acceptance.md)
-- [项目进展](docs/04-project-status.md)
-- [UI 技术选型](docs/adr/0001-ui-stack.md)
+**支持 macOS / Linux 吗？**
+当前只发布 Windows x64；底层 crate 不依赖 GPUI，但尚未提供其他平台构建。
 
 ## 许可证
 
 GPL-3.0-or-later。第三方组件声明见 `packaging/THIRD_PARTY_NOTICES.md`。
+
+---
+
+<div align="center">
+  <sub>如果 Melos 对你有帮助，欢迎在仓库点一个 Star。</sub>
+</div>
