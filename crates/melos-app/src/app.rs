@@ -2140,7 +2140,9 @@ impl Root {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .when(self.view != View::Lyrics, |body| body.child(self.header()))
+                    .when(self.view != View::Lyrics, |body| {
+                        body.child(self.header(cx))
+                    })
                     .child(self.body(window, cx)),
             );
 
@@ -2256,10 +2258,33 @@ impl Root {
             )
     }
 
-    fn header(&self) -> impl IntoElement {
+    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let subtitle = match self.view {
+            View::Home | View::Albums => format!("{} 张专辑", self.albums.len()),
+            View::Artists => format!("{} 位艺人", self.artists.len()),
+            View::Songs => format!("{} 首歌曲", self.library_songs.len()),
+            View::Playlists => format!("{} 个歌单", self.playlists.len()),
+            View::Search => match self.search_result.as_ref() {
+                Some(result) => format!(
+                    "艺人 {} · 专辑 {} · 歌曲 {}",
+                    result.artist.len(),
+                    result.album.len(),
+                    result.song.len()
+                ),
+                None => "艺人、专辑与歌曲".to_owned(),
+            },
+            View::Settings => {
+                format!("{} 个音乐源", self.settings.read(cx).sources.len())
+            }
+            View::Lyrics => String::new(),
+        };
+        let actions: AnyElement = match self.view {
+            View::Albums | View::Artists => self.scope_toolbar(cx),
+            _ => div().into_any_element(),
+        };
         div()
             .flex()
-            .items_end()
+            .items_center()
             .justify_between()
             .px_8()
             .pt_8()
@@ -2269,8 +2294,10 @@ impl Root {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().text_3xl().child(self.view.label())),
+                    .child(div().text_3xl().child(self.view.label()))
+                    .child(ui::muted_label(subtitle)),
             )
+            .child(actions)
     }
 
     fn body(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -2367,9 +2394,6 @@ impl Root {
             .px_8()
             .pb_8()
             .gap_3()
-            .when(self.view == View::Albums, |view| {
-                view.child(self.scope_toolbar(cx))
-            })
             .child(
                 uniform_list(
                     "album-library",
@@ -3112,13 +3136,7 @@ impl Root {
             );
         }
 
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(self.scope_toolbar(cx))
-            .child(list)
-            .into_any_element()
+        list.into_any_element()
     }
 
     // ------------------------------------------------------------------ search
