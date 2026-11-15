@@ -230,6 +230,7 @@ pub struct Root {
     lyrics_center_height: f32,
     lyrics_scroll_generation: u64,
     lyrics_center_retry: bool,
+    lyrics_full: bool,
     lyrics_return: View,
     random_request: u64,
     random_pending: bool,
@@ -361,6 +362,7 @@ impl Root {
             lyrics_center_height: 0.,
             lyrics_scroll_generation: 0,
             lyrics_center_retry: false,
+            lyrics_full: false,
             lyrics_return: View::Home,
             random_request: 0,
             random_pending: false,
@@ -2155,6 +2157,130 @@ impl Root {
 
     /// Opens or closes the lyrics page from the artwork, keeping the browsing
     /// context (album detail, artist page) intact.
+    /// Fullscreen karaoke lyrics, toggled with Ctrl+L or the player bar button.
+    fn toggle_fullscreen_lyrics(&mut self, cx: &mut Context<Self>) {
+        if self.now_playing.is_none() {
+            return;
+        }
+        self.lyrics_full = !self.lyrics_full;
+        cx.notify();
+    }
+
+    fn fullscreen_lyrics_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let song = self.now_playing.clone();
+        let lyrics = self.lyrics.get(self.lyrics_track);
+        let synced = lyrics.as_ref().is_some_and(|lyrics| lyrics.synced);
+        let active = self.lyrics_active;
+        let mut lines: Vec<AnyElement> = Vec::new();
+        if let Some(lyrics) = lyrics {
+            if synced {
+                let current = active.unwrap_or(0);
+                for index in current.saturating_sub(2)..lyrics.lines.len().min(current + 3) {
+                    let text = lyrics.lines[index].text.clone();
+                    if index == current {
+                        lines.push(
+                            div()
+                                .text_size(px(40.))
+                                .text_color(rgb(theme::TEXT))
+                                .child(text)
+                                .into_any_element(),
+                        );
+                    } else {
+                        lines.push(
+                            div()
+                                .text_lg()
+                                .text_color(rgb(theme::TEXT_MUTED))
+                                .child(text)
+                                .into_any_element(),
+                        );
+                    }
+                }
+            } else {
+                for line in &lyrics.lines {
+                    lines.push(
+                        div()
+                            .text_lg()
+                            .text_color(rgb(theme::TEXT_MUTED))
+                            .child(line.text.clone())
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+        if lines.is_empty() {
+            lines.push(
+                div()
+                    .text_lg()
+                    .text_color(rgb(theme::TEXT_MUTED))
+                    .child(
+                        self.lyrics_error
+                            .clone()
+                            .unwrap_or_else(|| "这首歌曲没有可用歌词".to_owned()),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        div()
+            .id("fullscreen-lyrics")
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(0x0B0B0F))
+            .text_color(rgb(theme::TEXT))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_6()
+                    .pt_5()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div().text_base().child(
+                                    song.as_ref()
+                                        .map(|song| song.title.clone())
+                                        .unwrap_or_default(),
+                                ),
+                            )
+                            .child(ui::muted_label(
+                                song.and_then(|song| song.artist).unwrap_or_default(),
+                            )),
+                    )
+                    .child(ui::ghost_button(
+                        "fullscreen-lyrics-exit",
+                        "退出全屏 (Esc)",
+                        false,
+                        cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                            this.lyrics_full = false;
+                            cx.notify();
+                        }),
+                    )),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .px_12()
+                    .children(lines),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_center()
+                    .pb_3()
+                    .child(ui::muted_label("Ctrl+L 或 Esc 切换全屏歌词")),
+            )
+    }
+
     fn toggle_lyrics(&mut self, cx: &mut Context<Self>) {
         if self.view == View::Lyrics {
             self.view = self.lyrics_return;
@@ -3528,6 +3654,18 @@ impl Root {
                         cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
                             this.cycle_repeat(cx);
                         }),
+                    ))
+                    .child(ui::ghost_button(
+                        "lyrics-full",
+                        if self.lyrics_full {
+                            "退出全屏歌词"
+                        } else {
+                            "全屏歌词"
+                        },
+                        self.lyrics_full,
+                        cx.listener(|this: &mut Root, _: &ClickEvent, _, cx| {
+                            this.toggle_fullscreen_lyrics(cx);
+                        }),
                     )),
             )
             .child(
@@ -4011,7 +4149,9 @@ impl Render for Root {
             })
             .detach();
         }
-        let content = if self.connected {
+        let content = if self.connected && self.lyrics_full {
+            self.fullscreen_lyrics_view(cx).into_any_element()
+        } else if self.connected {
             self.shell(window, cx).into_any_element()
         } else {
             self.connect_view(cx).into_any_element()
@@ -4032,6 +4172,10 @@ impl Render for Root {
                                     .playlist_name
                                     .read(cx)
                                     .contains_position(event.position))
+                            || (this.view == View::Settings
+                                && [&this.new_server, &this.new_username, &this.new_password]
+                                    .iter()
+                                    .any(|input| input.read(cx).contains_position(event.position)))
                     } else {
                         [&this.server, &this.username, &this.password]
                             .iter()
@@ -4047,6 +4191,9 @@ impl Render for Root {
                     &this.server,
                     &this.username,
                     &this.password,
+                    &this.new_server,
+                    &this.new_username,
+                    &this.new_password,
                     &this.search,
                     &this.playlist_name,
                 ];
@@ -4057,6 +4204,11 @@ impl Render for Root {
                     input.read(cx).focus_handle(cx).is_focused(window)
                         && input.read(cx).is_composing()
                 });
+                if this.lyrics_full && !editing && event.keystroke.key == "escape" {
+                    this.lyrics_full = false;
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.connected
                     && let Some(shortcut) =
                         crate::shortcuts::resolve(&event.keystroke, editing, composing)
@@ -4091,6 +4243,7 @@ impl Render for Root {
                             let handle = this.search.read(cx).focus_handle(cx);
                             window.focus(&handle, cx);
                         }
+                        Shortcut::Lyrics => this.toggle_fullscreen_lyrics(cx),
                     }
                     cx.stop_propagation();
                     return;

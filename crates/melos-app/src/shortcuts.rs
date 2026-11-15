@@ -13,6 +13,7 @@ pub enum Shortcut {
     Repeat,
     Queue,
     Search,
+    Lyrics,
 }
 
 pub fn resolve(key: &Keystroke, editing: bool, composing: bool) -> Option<Shortcut> {
@@ -37,6 +38,7 @@ pub fn resolve(key: &Keystroke, editing: bool, composing: bool) -> Option<Shortc
         (true, "s") => Some(Shortcut::Shuffle),
         (true, "r") => Some(Shortcut::Repeat),
         (true, "q") => Some(Shortcut::Queue),
+        (true, "l") => Some(Shortcut::Lyrics),
         _ => None,
     }
 }
