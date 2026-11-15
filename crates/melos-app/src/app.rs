@@ -1606,7 +1606,7 @@ impl Root {
         } else {
             1
         };
-        let current = self.list_cursor.unwrap_or(0).min(len - 1);
+        let current = self.list_cursor.map_or(0, |index| index.min(len - 1));
         let next = if delta < 0 {
             current.saturating_sub(step)
         } else {
@@ -2174,14 +2174,27 @@ impl Root {
         let mut lines: Vec<AnyElement> = Vec::new();
         if let Some(lyrics) = lyrics {
             if synced {
-                let current = active.unwrap_or(0);
-                for index in current.saturating_sub(2)..lyrics.lines.len().min(current + 3) {
-                    let text = lyrics.lines[index].text.clone();
+                let mut current = active.unwrap_or(0).min(lyrics.lines.len() - 1);
+                if lyrics.lines[current].text.trim().is_empty() {
+                    // Instrumental gap: anchor on the next sung line.
+                    if let Some(next) = (current..lyrics.lines.len())
+                        .find(|index| !lyrics.lines[*index].text.trim().is_empty())
+                    {
+                        current = next;
+                    }
+                }
+                let start = current.saturating_sub(2);
+                let end = lyrics.lines.len().min(current + 3);
+                for index in start..end {
+                    let text = lyrics.lines[index].text.trim().to_owned();
+                    if text.is_empty() {
+                        continue;
+                    }
                     if index == current {
                         lines.push(
                             div()
-                                .text_size(px(40.))
-                                .text_color(rgb(theme::TEXT))
+                                .text_size(px(44.))
+                                .text_color(rgb(0xFFFFFF))
                                 .child(text)
                                 .into_any_element(),
                         );
