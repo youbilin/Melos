@@ -42,8 +42,8 @@ Melos 是一个面向自建音乐库的 Windows 客户端。桌面端使用 GPUI
 SHA256：
 
 ```
-a5fbc11a3a816969633ec083a15db678cb1021360b14651fc910a0f1dfcbd122  melos-0.1.19-windows-x64.zip
-aa2155a8ec2b628db43f2312ff039457f584f179cece7428cb5a6b3434dd90b7  melos-tui-0.1.19-windows-x64.zip
+0a7c26c2852ec9a50866115622b14b69ce6de4c9bb3e9ccadf7705332afe2630  melos-0.1.19-windows-x64.zip
+9c81706ae2a84c318a6eee6393951e30557bdb1bf8541ad0e1b0d09b001fe883  melos-tui-0.1.19-windows-x64.zip
 ```
 
 **系统要求**：Windows 10 1903+ 或 Windows 11（x64），并安装 [Microsoft Visual C++ 2015–2022 Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe)。
