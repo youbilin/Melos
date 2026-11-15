@@ -6,8 +6,9 @@ use melos_core::lyrics::Lyrics;
 use melos_core::{Queue, RepeatMode, Settings};
 use melos_player::{Engine, EngineSnapshot, StreamSpec};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Color, Style};
+use ratatui::layout::{Alignment, Constraint, Layout};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::Line as TextLine;
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 use std::collections::HashSet;
 use std::io::{self, IsTerminal};
@@ -83,6 +84,7 @@ struct App {
     lyrics_status: Option<String>,
     lyrics_track: usize,
     lyrics_selection: ListState,
+    lyrics_full: bool,
     source_selection: ListState,
     source_form: Option<SourceForm>,
     scrobbled: bool,
@@ -92,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "Melos terminal player\nUsage: melos-tui [--help|--version]\nUses desktop connection settings; MELOS_CONFIG_DIR selects another configuration.\n1 albums · 2 playlists · 3 queue · 4 lyrics · 5 all songs · 6 music sources · 7 artists · / search songs and artists · Enter open/play\nSpace pause · n/p next/previous · Left/Right seek · +/- volume · s shuffle · r repeat\nx mark album · R shuffle marked · a append song · i play next · d remove queue entry · J/K reorder · D clear upcoming\nL load more albums · t switch lyrics · e reconnect audio (paused) · Esc cancel/back · q or Ctrl+C quit"
+            "Melos terminal player\nUsage: melos-tui [--help|--version]\nUses desktop connection settings; MELOS_CONFIG_DIR selects another configuration.\n1 albums · 2 playlists · 3 queue · 4 lyrics · 5 all songs · 6 music sources · 7 artists · / search songs and artists · Enter open/play\nSpace pause · n/p next/previous · Left/Right seek · +/- volume · s shuffle · r repeat\nx mark album · R shuffle marked · a append song · i play next · d remove queue entry · J/K reorder · D clear upcoming\nL load more albums · f fullscreen lyrics · t switch lyrics · e reconnect audio (paused) · Esc cancel/back · q or Ctrl+C quit"
         );
         return Ok(());
     }
@@ -200,6 +202,7 @@ impl App {
             lyrics_status: None,
             lyrics_track: 0,
             lyrics_selection: ListState::default(),
+            lyrics_full: false,
             source_selection: ListState::default(),
             source_form: None,
             scrobbled: false,
@@ -711,6 +714,14 @@ impl App {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return true;
         }
+        if self.lyrics_full {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('f') => self.lyrics_full = false,
+                KeyCode::Char('q') => return true,
+                _ => {}
+            }
+            return false;
+        }
         if self.source_form.is_some() {
             return self.source_form_key(key);
         }
@@ -751,6 +762,16 @@ impl App {
             KeyCode::Char('5') => self.library(),
             KeyCode::Char('6') => self.open_sources(),
             KeyCode::Char('7') => self.page(Page::Artists),
+            KeyCode::Char('f') => {
+                if !self.lyrics.is_empty() {
+                    if self.page != Page::Lyrics {
+                        self.page(Page::Lyrics);
+                    }
+                    self.lyrics_full = true;
+                } else {
+                    self.status = "No lyrics loaded · open the lyrics page first".into();
+                }
+            }
             KeyCode::Char('x')
                 if matches!(self.page, Page::Albums | Page::Artists | Page::Search) =>
             {
@@ -986,6 +1007,62 @@ impl App {
         false
     }
     fn render(&mut self, frame: &mut Frame) {
+        if self.page == Page::Lyrics
+            && self.lyrics_full
+            && let Some(lyrics) = self
+                .lyrics
+                .get(self.lyrics_track)
+                .filter(|lyrics| lyrics.synced && !lyrics.lines.is_empty())
+        {
+            let active = lyrics.active_range(self.snapshot.position_ms);
+            let current = if active.is_empty() { 0 } else { active.start };
+            let start = current.saturating_sub(2);
+            let end = lyrics.lines.len().min(current + 3);
+            let mut text = Vec::with_capacity(end - start + 2);
+            for index in start..end {
+                let line = lyrics.lines[index].text.clone();
+                if index == current {
+                    text.push(TextLine::styled(
+                        line,
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                } else {
+                    text.push(TextLine::styled(line, Style::default().fg(Color::DarkGray)));
+                }
+            }
+            text.push(TextLine::default());
+            text.push(
+                TextLine::styled(
+                    self.queue
+                        .current()
+                        .map(|song| song.title.clone())
+                        .unwrap_or_default(),
+                    Style::default().fg(Color::Gray),
+                )
+                .alignment(Alignment::Center),
+            );
+            let [_, middle, _, hint] = Layout::vertical([
+                Constraint::Fill(1),
+                Constraint::Length(text.len() as u16),
+                Constraint::Fill(1),
+                Constraint::Length(1),
+            ])
+            .areas(frame.area());
+            frame.render_widget(
+                Paragraph::new(text)
+                    .alignment(Alignment::Center)
+                    .block(Block::bordered().title("Lyrics · f/Esc exit")),
+                middle,
+            );
+            frame.render_widget(
+                Paragraph::new("f/Esc exit fullscreen · Space pause · n/p skip · +/- volume")
+                    .alignment(Alignment::Center),
+                hint,
+            );
+            return;
+        }
         let [tabs, body, player, footer] = Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(1),
@@ -1281,6 +1358,18 @@ mod tests {
         assert!(!app.queue.shuffle());
         assert_eq!(app.queue.repeat(), RepeatMode::Off);
     }
+    #[test]
+    fn f_toggles_fullscreen_lyrics_and_esc_exits() {
+        let mut app = app();
+        app.lyrics
+            .push(Lyrics::parse("[00:01.00]one\n[00:02.00]two"));
+        app.page = Page::Lyrics;
+        app.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(app.lyrics_full);
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.lyrics_full);
+    }
+
     #[test]
     fn x_marks_an_artist_from_search_results() {
         let mut app = app();
