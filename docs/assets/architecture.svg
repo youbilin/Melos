@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="620" viewBox="0 0 1160 620" font-family="Segoe UI, Microsoft YaHei, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8A8A94"/>
+    </marker>
+  </defs>
+
+  <rect width="1160" height="620" fill="#101016"/>
+
+  <!-- UI layer -->
+  <rect x="80" y="30" width="440" height="104" rx="10" fill="#1C1C26" stroke="#4A4A56"/>
+  <text x="300" y="72" text-anchor="middle" font-size="20" fill="#F2F2F5" font-weight="600">melos-app</text>
+  <text x="300" y="102" text-anchor="middle" font-size="14" fill="#9A9AA4">桌面端 · GPUI</text>
+
+  <rect x="640" y="30" width="440" height="104" rx="10" fill="#1C1C26" stroke="#4A4A56"/>
+  <text x="860" y="72" text-anchor="middle" font-size="20" fill="#F2F2F5" font-weight="600">melos-tui</text>
+  <text x="860" y="102" text-anchor="middle" font-size="14" fill="#9A9AA4">终端端 · ratatui</text>
+
+  <!-- domain layer -->
+  <rect x="80" y="240" width="300" height="104" rx="10" fill="#1C1C26" stroke="#4A4A56"/>
+  <text x="230" y="282" text-anchor="middle" font-size="20" fill="#F2F2F5" font-weight="600">melos-api</text>
+  <text x="230" y="312" text-anchor="middle" font-size="14" fill="#9A9AA4">Subsonic / OpenSubsonic 客户端</text>
+
+  <rect x="430" y="240" width="300" height="104" rx="10" fill="#1C1C26" stroke="#4A4A56"/>
+  <text x="580" y="282" text-anchor="middle" font-size="20" fill="#F2F2F5" font-weight="600">melos-player</text>
+  <text x="580" y="312" text-anchor="middle" font-size="14" fill="#9A9AA4">symphonia 解码 + cpal 输出</text>
+
+  <rect x="780" y="240" width="300" height="104" rx="10" fill="#1C1C26" stroke="#4A4A56"/>
+  <text x="930" y="282" text-anchor="middle" font-size="20" fill="#F2F2F5" font-weight="600">melos-core</text>
+  <text x="930" y="312" text-anchor="middle" font-size="14" fill="#9A9AA4">队列 · 歌词 · 曲库排序 · 设置</text>
+
+  <!-- external -->
+  <rect x="180" y="460" width="300" height="104" rx="10" fill="#15151C" stroke="#3A3A44" stroke-dasharray="6 4"/>
+  <text x="330" y="502" text-anchor="middle" font-size="20" fill="#F2F2F5" font-weight="600">Navidrome</text>
+  <text x="330" y="532" text-anchor="middle" font-size="14" fill="#9A9AA4">Subsonic API · 音频流</text>
+
+  <rect x="680" y="460" width="300" height="104" rx="10" fill="#15151C" stroke="#3A3A44" stroke-dasharray="6 4"/>
+  <text x="830" y="502" text-anchor="middle" font-size="20" fill="#F2F2F5" font-weight="600">音频设备</text>
+  <text x="830" y="532" text-anchor="middle" font-size="14" fill="#9A9AA4">WASAPI / cpal</text>
+
+  <!-- UI -> domain -->
+  <g stroke="#8A8A94" stroke-width="1.6" fill="none">
+    <path d="M 240 134 L 210 236" marker-end="url(#arrow)"/>
+    <path d="M 340 134 L 560 236" marker-end="url(#arrow)"/>
+    <path d="M 430 134 L 900 236" marker-end="url(#arrow)"/>
+    <path d="M 720 134 L 262 236" marker-end="url(#arrow)"/>
+    <path d="M 820 134 L 610 236" marker-end="url(#arrow)"/>
+    <path d="M 930 134 L 930 236" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- domain -> core (shared) -->
+  <g stroke="#8A8A94" stroke-width="1.6" fill="none">
+    <path d="M 340 344 L 340 386 L 930 386 L 930 348" marker-end="url(#arrow)"/>
+    <path d="M 580 344 L 580 372 L 960 372 L 960 348" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- external edges -->
+  <g stroke="#8A8A94" stroke-width="1.6" fill="none">
+    <path d="M 230 344 L 310 456" marker-end="url(#arrow)"/>
+    <path d="M 580 344 L 800 456" marker-end="url(#arrow)"/>
+  </g>
+  <text x="180" y="420" font-size="13" fill="#8A8A94">HTTP 流 / REST</text>
+  <text x="660" y="420" font-size="13" fill="#8A8A94">PCM</text>
+</svg>

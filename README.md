@@ -15,6 +15,17 @@
 
 Melos 是一个面向自建音乐库的 Windows 客户端。桌面端使用 GPUI，终端端使用 ratatui，两端共享同一套播放引擎、队列状态机、歌词解析与设置存储——界面、解码与音频输出全部原生实现，不依赖任何 WebView 或多媒体运行时。
 
+## 界面预览
+
+<p align="center">
+  <img src="docs/assets/preview-desktop.png" alt="桌面端 · 专辑曲库" width="49%">
+&nbsp;
+  <img src="docs/assets/preview-lyrics.png" alt="桌面端 · 全屏歌词" width="49%">
+</p>
+<p align="center">
+  <img src="docs/assets/preview-tui.png" alt="终端端" width="82%">
+</p>
+
 ## 特性
 
 ### 播放
@@ -121,6 +132,10 @@ Melos 是一个面向自建音乐库的 Windows 客户端。桌面端使用 GPUI
 | `Esc` / `q` | 返回上一级 / 退出 |
 
 ## 架构
+
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="Melos 架构" width="100%">
+</p>
 
 ```text
 crates/
